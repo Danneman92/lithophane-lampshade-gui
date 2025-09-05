@@ -259,10 +259,18 @@ class MainWindow(QMainWindow):
         )
 
     def export_stl(self):
-        # ensure geometry exists
-        if self.gl_widget.verts is None or len(self.gl_widget.verts) == 0:
+        # Ensure geometry exists: check attribute presence and nonzero size safely
+        has_verts = hasattr(self.gl_widget, "verts") and isinstance(self.gl_widget.verts, (list, tuple, np.ndarray))
+        has_inds  = hasattr(self.gl_widget, "inds")  and isinstance(self.gl_widget.inds,  (list, tuple, np.ndarray))
+
+        verts_ok = has_verts and (np.size(self.gl_widget.verts) > 0)
+        inds_ok  = has_inds  and (np.size(self.gl_widget.inds)  > 0)
+
+        if not (verts_ok and inds_ok):
             self.generate_model()
-            if self.gl_widget.verts is None or len(self.gl_widget.verts) == 0:
+            verts_ok = hasattr(self.gl_widget, "verts") and (np.size(self.gl_widget.verts) > 0)
+            inds_ok  = hasattr(self.gl_widget, "inds")  and (np.size(self.gl_widget.inds)  > 0)
+            if not (verts_ok and inds_ok):
                 QMessageBox.warning(self, "Export STL", "No geometry to export.")
                 return
 
@@ -273,11 +281,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # Flip normals to make the INSIDE front-lit in viewers like FreeCAD
             save_binary_stl(
                 path,
-                self.gl_widget.verts,   # any array-like OK; coerced to (N,3) float32
-                self.gl_widget.inds,    # list/array OK; coerced to (M,3) int64
+                self.gl_widget.verts,   # will be coerced to (N,3)
+                self.gl_widget.inds,    # will be coerced to (M,3)
                 header_text="Lithophane (mm)",
                 smooth_inside=True
             )
