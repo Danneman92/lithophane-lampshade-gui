@@ -1,0 +1,70 @@
+/* Base */
+QMainWindow, QWidget { background: #202124; color: #e8eaed; }
+
+/* Groups */
+QGroupBox {
+  color:#e8eaed; border:1px solid #3c4043; border-radius:8px;
+  margin-top:12px; background:#202124;
+}
+QGroupBox::title {
+  subcontrol-origin: margin; subcontrol-position: top left;
+  padding:4px 8px; background:#303134; border-radius:6px;
+}
+
+/* Labels */
+QLabel { color:#e8eaed; }
+
+/* Buttons */
+QPushButton { padding:6px 12px; border:1px solid #5f6368; border-radius:6px; background:#3c4043; color:#e8eaed; }
+QPushButton:hover   { background:#4a4f54; }
+QPushButton:pressed { background:#5a5f65; }
+#primaryButton { background:#2e7d32; border-color:#2e7d32; color:#fff; font-weight:600; }
+#primaryButton:hover  { background:#2a7230; }
+#primaryButton:pressed{ background:#276b2d; }
+#viewButton { padding:4px 10px; background:#3c4043; border:1px solid #5f6368; }
+
+/* Spin boxes: compact, right padding for buttons */
+QDoubleSpinBox {
+  min-height:28px; max-width:160px;
+  padding:2px 26px 2px 6px;           /* room for arrows */
+  background:#2b2b2b; color:#e8eaed;
+  border:1px solid #5f6368; border-radius:6px;
+  selection-background-color:#8ab4f8;
+}
+
+/* Dark buttons like the scrollbar, with bright arrows */
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
+  subcontrol-origin: border; subcontrol-position: top right;
+  width:18px; border-left:1px solid #5f6368; background:#3a3a3a;
+}
+QAbstractSpinBox::down-button { subcontrol-position: bottom right; }
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover   { background:#4a4a4a; }
+QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed { background:#5a5a5a; }
+
+/* High-contrast SVG arrows (ensure assets/arrow_*.svg exist) */
+QAbstractSpinBox::up-arrow   { width:10px; height:10px; image: url(assets/arrow_up.svg); }
+QAbstractSpinBox::down-arrow { width:10px; height:10px; image: url(assets/arrow_down.svg); }
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::down-arrow:disabled { image: none; }
+
+/* Thumbnails */
+#thumbnail { border:1px solid #9aa0a6; border-radius:6px; background:#2b2b2b; color:#dddddd; }
+
+/* Scroll area & splitter */
+QScrollArea { background:#202124; border:none; }
+QAbstractScrollArea::corner { background:#202124; }
+QSplitter::handle { background:#303134; }
+
+/* Scrollbars (dark track + lighter handle) */
+QScrollBar:vertical { background:#1f1f1f; width:12px; margin:14px 0; border:none; }
+QScrollBar::handle:vertical { background:#5f6368; min-height:24px; border-radius:6px; }
+QScrollBar::handle:vertical:hover  { background:#7a7f85; }
+QScrollBar::handle:vertical:pressed{ background:#8a9096; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }
+
+QScrollBar:horizontal { background:#1f1f1f; height:12px; margin:0 14px; border:none; }
+QScrollBar::handle:horizontal { background:#5f6368; min-width:24px; border-radius:6px; }
+QScrollBar::handle:horizontal:hover  { background:#7a7f85; }
+QScrollBar::handle:horizontal:pressed{ background:#8a9096; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:#1f1f1f; }
