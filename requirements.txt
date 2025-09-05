@@ -1,0 +1,17 @@
+# Python Dependencies for Lithophane Lampshade GUI
+# Core GUI library (included in Python standard library)
+# tkinter - GUI framework
+
+# Image processing libraries
+Pillow>=9.0.0
+numpy>=1.21.0
+
+# Optional dependencies for advanced features
+# opencv-python>=4.5.0  # For advanced image processing
+# matplotlib>=3.5.0     # For plotting and visualization
+# scipy>=1.8.0          # For scientific computing
+
+# Development dependencies
+# pytest>=6.0.0         # For testing
+# black>=22.0.0         # For code formatting
+# flake8>=4.0.0         # For code linting
