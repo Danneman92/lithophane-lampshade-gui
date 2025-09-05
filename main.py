@@ -1,292 +1,278 @@
 #!/usr/bin/env python3
 """
 Lithophane Lampshade GUI Application
-A graphical interface for creating lithophane lampshades
+- Load up to 4 photos with live thumbnails
+- Min/Max thickness mapping (white=min, black=max)
+- 3D preview with unlit grayscale based on thickness (no lighting)
+- Geometry oriented Y-up (height along Y), relief radial in XZ
+- NEW: Top/Bottom diameter inputs for conical (frustum) shapes
 """
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import os
 import sys
-from stl import mesh
+import numpy as np
+from PIL import Image, ImageQt
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QFileDialog, QLabel, QSpinBox, QGridLayout, QDoubleSpinBox
+)
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap
+from glwidget import GLWidget
 
-class LithophaneLampshadeGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Lithophane Lampshade Creator")
-        self.root.geometry("1200x900")
-        
-        # Image and parameters
-        self.original_image = None
-        self.preview_image = None
-        self.height = tk.DoubleVar(value=100.0)
-        self.diameter = tk.DoubleVar(value=80.0)
-        self.thickness = tk.DoubleVar(value=3.0)
-        self.min_thickness = tk.DoubleVar(value=0.8)
-        
-        self.setup_ui()
-        
-    def setup_ui(self):
-        # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Configure grid weights
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
-        
-        # Title
-        title_label = ttk.Label(main_frame, text="Lithophane Lampshade Creator", 
-                               font=('Arial', 16, 'bold'))
-        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
-        
-        # Left panel for controls
-        left_frame = ttk.Frame(main_frame)
-        left_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
-        
-        # Image selection
-        ttk.Label(left_frame, text="Image Selection", font=('Arial', 12, 'bold')).grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
-        ttk.Button(left_frame, text="Select Image", command=self.select_image).grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        
-        # Parameters frame
-        params_frame = ttk.LabelFrame(left_frame, text="Lampshade Parameters", padding="10")
-        params_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        
-        # Height parameter
-        ttk.Label(params_frame, text="Height (mm):").grid(row=0, column=0, sticky=tk.W)
-        height_scale = ttk.Scale(params_frame, from_=50, to=200, variable=self.height, orient=tk.HORIZONTAL)
-        height_scale.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(10, 0))
-        ttk.Label(params_frame, textvariable=self.height).grid(row=0, column=2, padx=(10, 0))
-        
-        # Diameter parameter
-        ttk.Label(params_frame, text="Diameter (mm):").grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
-        diameter_scale = ttk.Scale(params_frame, from_=40, to=150, variable=self.diameter, orient=tk.HORIZONTAL)
-        diameter_scale.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(10, 0), pady=(5, 0))
-        ttk.Label(params_frame, textvariable=self.diameter).grid(row=1, column=2, padx=(10, 0), pady=(5, 0))
-        
-        # Thickness parameter
-        ttk.Label(params_frame, text="Max Thickness (mm):").grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
-        thickness_scale = ttk.Scale(params_frame, from_=1, to=5, variable=self.thickness, orient=tk.HORIZONTAL)
-        thickness_scale.grid(row=2, column=1, sticky=(tk.W, tk.E), padx=(10, 0), pady=(5, 0))
-        ttk.Label(params_frame, textvariable=self.thickness).grid(row=2, column=2, padx=(10, 0), pady=(5, 0))
-        
-        # Min thickness parameter
-        ttk.Label(params_frame, text="Min Thickness (mm):").grid(row=3, column=0, sticky=tk.W, pady=(5, 0))
-        min_thickness_scale = ttk.Scale(params_frame, from_=0.4, to=2, variable=self.min_thickness, orient=tk.HORIZONTAL)
-        min_thickness_scale.grid(row=3, column=1, sticky=(tk.W, tk.E), padx=(10, 0), pady=(5, 0))
-        ttk.Label(params_frame, textvariable=self.min_thickness).grid(row=3, column=2, padx=(10, 0), pady=(5, 0))
-        
-        params_frame.columnconfigure(1, weight=1)
-        
-        # Generate button
-        ttk.Button(left_frame, text="Generate Lampshade STL", command=self.generate_lampshade).grid(row=3, column=0, sticky=(tk.W, tk.E), pady=10)
-        
-        # Right panel for image preview
-        right_frame = ttk.Frame(main_frame)
-        right_frame.grid(row=1, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        # Image preview
-        self.image_label = ttk.Label(right_frame, text="No image selected")
-        self.image_label.grid(row=0, column=0, padx=10, pady=10)
-        
-        left_frame.columnconfigure(0, weight=1)
-        
-    def select_image(self):
-        file_path = filedialog.askopenfilename(
-            title="Select Image",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff")]
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Lithophane Lampshade Creator")
+        self.setGeometry(100, 100, 1200, 900)
+
+        # State
+        self.image_paths = [None] * 4
+        self.images = [None] * 4
+        self.img_labels = []
+        self.preview_labels = []
+
+        # Parameters
+        self.height = 150               # mm
+        self.top_diam = 160             # mm (top diameter)
+        self.bottom_diam = 160          # mm (bottom diameter)
+        self.min_thickness = 0.30       # mm (white)
+        self.max_thickness = 3.00       # mm (black)
+
+        self._build_ui()
+
+    def _build_ui(self):
+        central = QWidget()
+        root = QHBoxLayout()
+
+        # Left controls
+        controls_box = QVBoxLayout()
+
+        grid = QGridLayout()
+        for i in range(4):
+            btn = QPushButton(f"Load Photo {i+1}")
+            btn.clicked.connect(lambda _, idx=i: self.select_image(idx))
+            name = QLabel("No file")
+            thumb = QLabel()
+            thumb.setFixedSize(100, 100)
+            thumb.setAlignment(Qt.AlignCenter)
+            thumb.setStyleSheet("border: 1px solid #888; background:#222;")
+            grid.addWidget(btn, i, 0)
+            grid.addWidget(name, i, 1)
+            grid.addWidget(thumb, i, 2)
+            self.img_labels.append(name)
+            self.preview_labels.append(thumb)
+
+        controls_box.addLayout(grid)
+
+        # Height
+        controls_box.addWidget(QLabel("Height"))
+        sp_h = QSpinBox()
+        sp_h.setRange(50, 400)
+        sp_h.setValue(self.height)
+        sp_h.valueChanged.connect(lambda v: setattr(self, "height", v))
+        controls_box.addWidget(sp_h)
+
+        # Top diameter
+        controls_box.addWidget(QLabel("Top Diameter"))
+        sp_dt = QSpinBox()
+        sp_dt.setRange(40, 600)
+        sp_dt.setValue(self.top_diam)
+        sp_dt.valueChanged.connect(lambda v: setattr(self, "top_diam", v))
+        controls_box.addWidget(sp_dt)
+
+        # Bottom diameter
+        controls_box.addWidget(QLabel("Bottom Diameter"))
+        sp_db = QSpinBox()
+        sp_db.setRange(40, 600)
+        sp_db.setValue(self.bottom_diam)
+        sp_db.valueChanged.connect(lambda v: setattr(self, "bottom_diam", v))
+        controls_box.addWidget(sp_db)
+
+        # Min thickness
+        controls_box.addWidget(QLabel("Min Thickness"))
+        sp_min = QDoubleSpinBox()
+        sp_min.setRange(0.1, 10.0)
+        sp_min.setDecimals(2)
+        sp_min.setSingleStep(0.05)
+        sp_min.setValue(self.min_thickness)
+        sp_min.valueChanged.connect(lambda v: setattr(self, "min_thickness", v))
+        controls_box.addWidget(sp_min)
+
+        # Max thickness
+        controls_box.addWidget(QLabel("Max Thickness"))
+        sp_max = QDoubleSpinBox()
+        sp_max.setRange(0.1, 10.0)
+        sp_max.setDecimals(2)
+        sp_max.setSingleStep(0.05)
+        sp_max.setValue(self.max_thickness)
+        sp_max.valueChanged.connect(lambda v: setattr(self, "max_thickness", v))
+        controls_box.addWidget(sp_max)
+
+        # Generate
+        gen = QPushButton("Generate Lampshade")
+        gen.setStyleSheet("QPushButton{background:#2e7d32;color:white;font-weight:bold;}")
+        gen.clicked.connect(self.generate_model)
+        controls_box.addWidget(gen)
+
+        left_widget = QWidget()
+        left_widget.setLayout(controls_box)
+        root.addWidget(left_widget)
+
+        # Right: view buttons + GL widget
+        self.gl_widget = GLWidget()
+
+        view_bar = QHBoxLayout()
+        for name in ["Iso", "Front", "Back", "Left", "Right", "Top", "Bottom"]:
+            b = QPushButton(name)
+            b.clicked.connect(lambda _, n=name: self.gl_widget.set_view(n))
+            view_bar.addWidget(b)
+
+        right_col = QVBoxLayout()
+        vw = QWidget()
+        vw.setLayout(view_bar)
+        right_col.addWidget(vw)
+        right_col.addWidget(self.gl_widget, stretch=1)
+
+        right_widget = QWidget()
+        right_widget.setLayout(right_col)
+        root.addWidget(right_widget, stretch=1)
+
+        central.setLayout(root)
+        self.setCentralWidget(central)
+
+    def select_image(self, idx: int):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
         )
-        
-        if file_path:
-            try:
-                self.original_image = Image.open(file_path).convert('L')  # Convert to grayscale
-                self.display_preview()
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load image: {str(e)}")
-    
-    def display_preview(self):
-        if self.original_image:
-            # Resize image for preview
-            preview_size = (300, 300)
-            self.preview_image = self.original_image.copy()
-            self.preview_image.thumbnail(preview_size, Image.Resampling.LANCZOS)
-            
-            # Convert to PhotoImage for tkinter
-            photo = ImageTk.PhotoImage(self.preview_image)
-            self.image_label.configure(image=photo, text="")
-            self.image_label.image = photo  # Keep a reference
-    
-    def generate_lampshade(self):
-        if self.original_image is None:
-            messagebox.showerror("Error", "Please select an image first")
+        if not path:
             return
-        
+        self.image_paths[idx] = path
+        filename = path.split("/")[-1]
+        self.img_labels[idx].setText(filename if len(filename) <= 24 else filename[:21] + "...")
+        img = Image.open(path)
+        self.images[idx] = img
+
+        # thumbnail
+        thumb = img.copy()
+        thumb.thumbnail((100, 100))
         try:
-            # Generate cylindrical lithophane mesh
-            vertices, faces = self.create_cylindrical_lithophane()
-            
-            # Create 3D preview
-            self.show_3d_preview(vertices, faces)
-            
-            # Export STL
-            self.export_stl(vertices, faces)
-            
-            messagebox.showinfo("Success", "Lampshade STL generated successfully!")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate lampshade: {str(e)}")
-    
-    def create_cylindrical_lithophane(self):
-        # Get parameters
-        height = self.height.get()
-        diameter = self.diameter.get()
-        radius = diameter / 2
-        max_thickness = self.thickness.get()
-        min_thickness = self.min_thickness.get()
-        
-        # Resize image to appropriate resolution
-        img_width = 200  # Circumferential resolution
-        img_height = int(200 * height / diameter)  # Height resolution
-        
-        resized_img = self.original_image.resize((img_width, img_height), Image.Resampling.LANCZOS)
-        img_array = np.array(resized_img, dtype=np.float32) / 255.0
-        
-        # Create cylindrical coordinates
-        theta = np.linspace(0, 2*np.pi, img_width, endpoint=False)
-        z = np.linspace(0, height, img_height)
-        
+            qimg = ImageQt.ImageQt(thumb)
+            pix = QPixmap.fromImage(qimg)
+            self.preview_labels[idx].setPixmap(pix)
+        except Exception:
+            thumb.save("_preview_tmp.png")
+            self.preview_labels[idx].setPixmap(QPixmap("_preview_tmp.png"))
+
+    def generate_model(self):
+        # Load grayscale images
+        imgs = [Image.open(p).convert("L") if p else None for p in self.image_paths]
+        if not any(imgs):
+            return
+
+        # Parameters
+        num_panels = 4
+        theta_step = 2.0 * np.pi / num_panels
+        H = float(self.height)
+        Rt = float(self.top_diam) / 2.0          # top radius
+        Rb = float(self.bottom_diam) / 2.0       # bottom radius
+        t_min = float(self.min_thickness)
+        t_max = float(self.max_thickness)
+
+        # Resolution of each panel grid
+        nrows, ncols = 120, 160  # rows along height (Y), cols around circumference
+
         vertices = []
-        faces = []
-        vertex_count = 0
-        
-        # Generate vertices for outer surface (lithophane)
-        for i in range(img_height):
-            for j in range(img_width):
-                angle = theta[j]
-                height_pos = z[i]
-                
-                # Calculate thickness based on image brightness
-                brightness = img_array[i, j]
-                thickness = min_thickness + (max_thickness - min_thickness) * (1 - brightness)
-                outer_radius = radius + thickness
-                
-                # Outer surface vertex
-                x_outer = outer_radius * np.cos(angle)
-                y_outer = outer_radius * np.sin(angle)
-                vertices.append([x_outer, y_outer, height_pos])
-                
-                # Inner surface vertex
-                x_inner = radius * np.cos(angle)
-                y_inner = radius * np.sin(angle)
-                vertices.append([x_inner, y_inner, height_pos])
-        
-        # Generate faces
-        for i in range(img_height - 1):
-            for j in range(img_width):
-                # Current vertex indices
-                curr_outer = (i * img_width + j) * 2
-                curr_inner = curr_outer + 1
-                
-                # Next vertex indices (wrap around for j)
-                next_j = (j + 1) % img_width
-                next_outer = (i * img_width + next_j) * 2
-                next_inner = next_outer + 1
-                
-                # Next row vertex indices
-                next_row_outer = ((i + 1) * img_width + j) * 2
-                next_row_inner = next_row_outer + 1
-                next_row_next_outer = ((i + 1) * img_width + next_j) * 2
-                next_row_next_inner = next_row_next_outer + 1
-                
-                # Outer surface faces
-                faces.append([curr_outer, next_outer, next_row_outer])
-                faces.append([next_outer, next_row_next_outer, next_row_outer])
-                
-                # Inner surface faces
-                faces.append([curr_inner, next_row_inner, next_inner])
-                faces.append([next_inner, next_row_inner, next_row_next_inner])
-                
-                # Side faces (connecting outer and inner)
-                if i == 0:  # Bottom edge
-                    faces.append([curr_outer, curr_inner, next_inner])
-                    faces.append([curr_outer, next_inner, next_outer])
-                
-                if i == img_height - 2:  # Top edge
-                    faces.append([next_row_outer, next_row_next_outer, next_row_next_inner])
-                    faces.append([next_row_outer, next_row_next_inner, next_row_inner])
-        
-        return np.array(vertices), np.array(faces)
-    
-    def show_3d_preview(self, vertices, faces):
-        try:
-            # Check that there are enough unique points
-            if len(vertices) < 10:
-                messagebox.showerror("Preview Error", "Not enough unique points for 3D preview.")
-                return
+        indices = []
+        normals = []
+        colors = []
+        vi = 0
 
-            # Create 3D matplotlib figure
-            fig = plt.figure(figsize=(10, 8))
-            ax = fig.add_subplot(111, projection='3d')
+        for panel_idx, img in enumerate(imgs):
+            if img is None:
+                continue
 
-            # Sample every 10th vertex for performance
-            sample_vertices = vertices[::10]
+            # Prepare thickness map (white=min, black=max)
+            img_resized = img.resize((ncols, nrows))
+            data = np.asarray(img_resized, dtype=np.float32) / 255.0  # 0..1, white=1 thin
+            thickness = t_min + (1.0 - data) * (t_max - t_min)        # thickness in mm
 
-            if len(sample_vertices) > 2:
-                # Plot as 3D scatter plot
-                ax.scatter(sample_vertices[:, 0],
-                        sample_vertices[:, 1],
-                        sample_vertices[:, 2],
-                        c=sample_vertices[:, 2],
-                        cmap='viridis',
-                        alpha=0.6,
-                        s=1)
-                ax.set_xlabel('X (mm)')
-                ax.set_ylabel('Y (mm)')
-                ax.set_zlabel('Z (mm)')
-                ax.set_title('Lithophane Lampshade Preview')
+            # Grayscale from thickness: white for thin, black for thick
+            norm_t = (thickness - t_min) / max(t_max - t_min, 1e-6)
+            gray = 1.0 - norm_t
 
-                max_range = np.ptp(vertices)
-                center = np.mean(vertices, axis=0)
-                ax.set_xlim([center[0] - max_range/2, center[0] + max_range/2])
-                ax.set_ylim([center[1] - max_range/2, center[1] + max_range/2])
-                ax.set_zlim([0, max_range])
+            # Build vertices grid for this panel, Y-up, radial in XZ
+            panel_verts = np.zeros((nrows, ncols, 3), dtype=np.float32)
+            panel_cols  = np.zeros((nrows, ncols, 3), dtype=np.float32)
 
-                plt.tight_layout()
-                plt.show()
-            else:
-                messagebox.showwarning("Preview", "Not enough vertices to generate preview")
-        except Exception as e:
-            print(f"Preview error: {e}")
-            messagebox.showwarning("Preview Error", f"Could not generate 3D preview: {str(e)}")
-    
-    def export_stl(self, vertices, faces):
-        # Create STL mesh
-        lampshade_mesh = mesh.Mesh(np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype))
-        
-        for i, face in enumerate(faces):
-            for j in range(3):
-                if face[j] < len(vertices):
-                    lampshade_mesh.vectors[i][j] = vertices[face[j]]
-        
-        # Save STL file
-        output_path = filedialog.asksaveasfilename(
-            title="Save STL file",
-            defaultextension=".stl",
-            filetypes=[("STL files", "*.stl")]
+            for i in range(nrows):
+                # y from top(H) to bottom(0) so object is upright
+                v = i / (nrows - 1)                # 0..1 top→bottom
+                y = H - v * H
+                # Linear radius interpolation for a right circular frustum
+                Rv = (1.0 - v) * Rt + v * Rb       # base radius at this height
+                for j in range(ncols):
+                    # Reverse angular progression so images read left→right outside
+                    u = 1.0 - (j / (ncols - 1))    # 1→0 around the panel
+                    angle = panel_idx * theta_step + u * theta_step
+                    r = Rv - thickness[i, j]       # inner surface relief
+                    x = r * np.cos(angle)
+                    z = r * np.sin(angle)
+                    panel_verts[i, j] = [x, y, z]
+                    g = gray[i, j]
+                    panel_cols[i, j] = [g, g, g]
+
+            # Compute normals (central differences)
+            panel_norms = np.zeros_like(panel_verts)
+            for i in range(nrows):
+                for j in range(ncols):
+                    i0 = max(i - 1, 0); i1 = min(i + 1, nrows - 1)
+                    j0 = max(j - 1, 0); j1 = min(j + 1, ncols - 1)
+                    du = panel_verts[i, j1] - panel_verts[i, j0]  # around circumference
+                    dv = panel_verts[i1, j] - panel_verts[i0, j]  # along height
+                    n = np.cross(du, dv)
+                    norm = np.linalg.norm(n)
+                    panel_norms[i, j] = (n / norm) if norm > 1e-8 else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+            # Append flattened arrays
+            vertices.extend(panel_verts.reshape(-1, 3).tolist())
+            colors.extend(panel_cols.reshape(-1, 3).tolist())
+            normals.extend(panel_norms.reshape(-1, 3).tolist())
+
+            # Indices
+            for i in range(nrows - 1):
+                for j in range(ncols - 1):
+                    a = vi + i * ncols + j
+                    b = vi + i * ncols + (j + 1)
+                    c = vi + (i + 1) * ncols + j
+                    d = vi + (i + 1) * ncols + (j + 1)
+                    indices.append([a, b, c])
+                    indices.append([b, d, c])
+
+            vi += nrows * ncols
+
+        # Optional: add top/bottom rings (neutral mid-gray)
+        ring_steps = 180
+        ring_gray = 0.5
+        for y, Rring in ((H, Rt), (0.0, Rb)):
+            for k in range(ring_steps):
+                ang = 2.0 * np.pi * (k / ring_steps)
+                x = (Rring + t_max) * np.cos(ang)
+                z = (Rring + t_max) * np.sin(ang)
+                vertices.append([x, y, z])
+                normals.append([0.0, 1.0 if y == H else -1.0, 0.0])
+                colors.append([ring_gray, ring_gray, ring_gray])
+
+        # Send to viewer (pass colors)
+        self.gl_widget.update_geometry(
+            np.asarray(vertices, dtype=np.float32),
+            np.asarray(indices, dtype=np.uint32),
+            np.asarray(normals, dtype=np.float32),
+            np.asarray(colors, dtype=np.float32),
         )
-        
-        if output_path:
-            lampshade_mesh.save(output_path)
-            print(f"STL file saved to: {output_path}")
 
-def main():
-    root = tk.Tk()
-    app = LithophaneLampshadeGUI(root)
-    root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec_())
