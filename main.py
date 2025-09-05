@@ -222,31 +222,46 @@ class LithophaneLampshadeGUI:
         return np.array(vertices), np.array(faces)
     
     def show_3d_preview(self, vertices, faces):
-        # Create 3D matplotlib figure
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        # Plot the mesh
-        for face in faces[:1000]:  # Limit faces for performance
-            if len(face) == 3 and all(i < len(vertices) for i in face):
-                triangle = vertices[face]
-                ax.plot_trisurf(triangle[:, 0], triangle[:, 1], triangle[:, 2], 
-                               alpha=0.6, shade=True)
-        
-        # Set labels and title
-        ax.set_xlabel('X (mm)')
-        ax.set_ylabel('Y (mm)')
-        ax.set_zlabel('Z (mm)')
-        ax.set_title('Lithophane Lampshade Preview')
-        
-        # Set equal aspect ratio
-        max_range = max(np.max(vertices) - np.min(vertices))
-        ax.set_xlim([-max_range/2, max_range/2])
-        ax.set_ylim([-max_range/2, max_range/2])
-        ax.set_zlim([0, max_range])
-        
-        plt.tight_layout()
-        plt.show()
+        try:
+            # Check that there are enough unique points
+            if len(vertices) < 10:
+                messagebox.showerror("Preview Error", "Not enough unique points for 3D preview.")
+                return
+
+            # Create 3D matplotlib figure
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection='3d')
+
+            # Sample every 10th vertex for performance
+            sample_vertices = vertices[::10]
+
+            if len(sample_vertices) > 2:
+                # Plot as 3D scatter plot
+                ax.scatter(sample_vertices[:, 0],
+                        sample_vertices[:, 1],
+                        sample_vertices[:, 2],
+                        c=sample_vertices[:, 2],
+                        cmap='viridis',
+                        alpha=0.6,
+                        s=1)
+                ax.set_xlabel('X (mm)')
+                ax.set_ylabel('Y (mm)')
+                ax.set_zlabel('Z (mm)')
+                ax.set_title('Lithophane Lampshade Preview')
+
+                max_range = np.ptp(vertices)
+                center = np.mean(vertices, axis=0)
+                ax.set_xlim([center[0] - max_range/2, center[0] + max_range/2])
+                ax.set_ylim([center[1] - max_range/2, center[1] + max_range/2])
+                ax.set_zlim([0, max_range])
+
+                plt.tight_layout()
+                plt.show()
+            else:
+                messagebox.showwarning("Preview", "Not enough vertices to generate preview")
+        except Exception as e:
+            print(f"Preview error: {e}")
+            messagebox.showwarning("Preview Error", f"Could not generate 3D preview: {str(e)}")
     
     def export_stl(self, vertices, faces):
         # Create STL mesh
