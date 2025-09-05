@@ -177,7 +177,7 @@ class LithophaneLampshadeGUI:
             title="Save STL File",
             defaultextension=".stl",
             filetypes=[("STL files", "*.stl"), ("All files", "*.*")],
-            initialname="lithophane_lampshade.stl"
+            initialfile="lithophane_lampshade.stl"
         )
         
         if save_path:
