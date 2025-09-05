@@ -5,6 +5,8 @@
 # Image processing libraries
 Pillow>=9.0.0
 numpy>=1.21.0
+matplotlib>=3.5
+numpy-stl>=3.0.0
 
 # Optional dependencies for advanced features
 # opencv-python>=4.5.0  # For advanced image processing
