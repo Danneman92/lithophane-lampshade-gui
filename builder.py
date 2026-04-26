@@ -21,25 +21,16 @@ class BuildParams:
     ncols: int = 160
     num_panels: int = 4
     shade_type: str = "Normal"
-    # Lamp socket adapter
     socket_enabled: bool = False
     socket_inner_diam: float = 26.0
     socket_wall: float = 2.5
     socket_height: float = 60.0
     socket_lip_height: float = 4.0
     socket_lip_overhang: float = 4.0
-    # Spokes
     spokes_enabled: bool = False
     spoke_count: int = 4
     spoke_width: float = 4.0
-    spoke_thickness: float = 2.0   # vertical height of each spoke rib
-    # Top brim fillet
-    # Fillet is a quarter-circle on the BOTTOM-OUTER edge of the top brim.
-    # When the shade is printed upside-down, this is the edge that would
-    # otherwise be a sharp 90-deg overhang hanging in mid-air.
-    # The arc sweeps from the flat bottom face (horizontal) to the outer
-    # cylindrical wall (vertical), staying <= 45 deg from horizontal
-    # so no supports are needed.
+    spoke_thickness: float = 2.0
     top_brim_fillet: float = 2.0
     top_brim_fillet_steps: int = 6
 
@@ -55,9 +46,6 @@ class LithophaneBuilder:
             return self._build_flat(imgs)
         return self._build_cylinder(imgs)
 
-    # ------------------------------------------------------------------
-    # cylinder builder
-    # ------------------------------------------------------------------
     def _build_cylinder(self, imgs):
         p = self.p
         H  = float(p.height)
@@ -77,7 +65,6 @@ class LithophaneBuilder:
         panel_rows_radii:  List[List[np.ndarray]] = []
         panel_rows_y:      List[np.ndarray]       = []
 
-        # ---- outer + inner shells -----------------------------------------------
         for p_idx, img in enumerate(imgs):
             if img is None:
                 panel_rows_angles.append([np.array([], dtype=np.float64) for _ in range(nrows)])
@@ -157,34 +144,21 @@ class LithophaneBuilder:
         if bot_outer_ring and bot_inner_ring:
             stitch_rings(indices, bot_inner_ring, bot_outer_ring, outward=False)
 
-        # ---- brims --------------------------------------------------------------
         mid_gray = (0.6, 0.6, 0.6)
 
+        # ------------------------------------------------------------------
         # Top brim
-        # Orientation reminder: shade prints UPSIDE DOWN, so y=H is on the bed.
-        # The top brim extends from y=H (shade top, on bed) upward to y=H+brim_height.
-        # The bottom face of the brim (at y=H, facing down = toward the bed) is fine.
-        # The problematic overhang is the OUTER-BOTTOM edge: the corner where the
-        # flat bottom face meets the outer cylindrical wall at (r_out, y=H).
-        # A quarter-circle fillet there replaces the sharp 90-deg corner:
-        #   - Arc starts tangent to the bottom face (horizontal) at r_out-fillet_r, y=H
-        #   - Arc ends tangent to the outer wall (vertical) at r_out, y=H+fillet_r
-        #   - Every point on the arc is <= 45 deg from horizontal => no supports needed
-        #
-        #  r_in      r_out-fr   r_out
-        #   |            |        |
-        #   +------------+........+ y=H+fr  (arc end, tangent vertical)
-        #   |  bottom    | fillet |
-        #   |  face      | arc    |  outer wall
-        #   +------------+        |
-        #   |<-- flat bottom -->  | y=H     (arc start, tangent horizontal)
-        #   +---------------------(+)  <- fillet rounded corner
-        #
+        # Prints upside-down: y=H is on the bed, y=H+brim_height is the top.
+        # Fillet is on the BOTTOM-OUTER corner (r_out, y=H) — the edge that
+        # would otherwise be a sharp 90-deg overhang in mid-air.
+        # Arc sweeps from horizontal (tangent to bottom face) to vertical
+        # (tangent to outer wall), always <= 45 deg from horizontal.
+        # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
             r_out    = Rt + p.top_brim_thickness
-            y0       = H                      # bottom of brim (shade top, on bed)
-            y1       = H + p.top_brim_height  # top of brim
+            y0       = H
+            y1       = H + p.top_brim_height
             fillet_r = min(
                 float(p.top_brim_fillet),
                 p.top_brim_thickness / 2.0,
@@ -194,19 +168,18 @@ class LithophaneBuilder:
             fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
             n_pts    = ncols * num_panels
 
-            # Helper: build a flat ring at a given radius + y, add to vertex arrays,
-            # return index list.
+            # --- local helpers (closures over vertices/colors/normals/indices) ---
             def _ring(r, y):
+                """Add n_pts vertices at radius r, height y. Return index list."""
                 s = len(vertices)
-                angs = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-                for ang in angs:
+                for ang in np.linspace(0, 2 * np.pi, n_pts, endpoint=False):
                     vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
                     colors.append(list(mid_gray))
                     normals.append([0.0, 1.0, 0.0])
                 return list(range(s, s + n_pts))
 
             def _stitch(inner_idx, outer_idx, outward=True):
-                """Stitch two equal-length rings into quads."""
+                """Quad-strip two equal-length rings."""
                 n = len(inner_idx)
                 for ii in range(n):
                     jj = (ii + 1) % n
@@ -219,12 +192,8 @@ class LithophaneBuilder:
                         indices.append([a, b, c])
                         indices.append([b, d, c])
 
-            # --- bottom face of brim (y=H, faces down toward bed) ----------------
-            # Connect shade top rings to r_in, then fill r_in -> r_out-fr (or r_out)
-            brim_inner_y0_xyz = build_ring_xyz_at_radius(r_in,  y0, ncols, num_panels, panels_present)
-            brim_outer_y0_xyz = build_ring_xyz_at_radius(r_out, y0, ncols, num_panels, panels_present)
-
-            # shade-top ring -> brim inner ring at y0
+            # shade-top edge -> brim inner ring at y0
+            brim_inner_y0_xyz = build_ring_xyz_at_radius(r_in, y0, ncols, num_panels, panels_present)
             si0 = len(vertices)
             for x, y, z in brim_inner_y0_xyz:
                 vertices.append([x, y, z]); colors.append(list(mid_gray)); normals.append([0.0, 1.0, 0.0])
@@ -232,52 +201,40 @@ class LithophaneBuilder:
             stitch_rings(indices, top_outer_ring, inner_y0_idx, outward=True)
 
             if fillet_r > 0:
-                # Bottom face only goes from r_in to r_out-fillet_r; the arc takes over
-                r_fillet_base = r_out - fillet_r
-                brim_fbase_xyz = build_ring_xyz_at_radius(r_fillet_base, y0, ncols, num_panels, panels_present)
-                sf = len(vertices)
-                for x, y, z in brim_fbase_xyz:
-                    vertices.append([x, y, z]); colors.append(list(mid_gray)); normals.append([0.0, 1.0, 0.0])
-                fbase_idx = list(range(sf, sf + len(brim_fbase_xyz)))
-                # fill flat bottom annulus: r_in -> r_out-fr
+                # Flat bottom annulus: r_in -> r_out-fillet_r  (fillet takes the corner)
+                fbase_idx    = _ring(r_out - fillet_r, y0)
                 _stitch(inner_y0_idx, fbase_idx, outward=True)
 
-                # Quarter-circle fillet arc from (r_out-fr, y0) to (r_out, y0+fr)
-                # Arc centre is at (r_out-fr, y0+fr).
-                # Parameter t: 0 = bottom tangent (horizontal), pi/2 = side tangent (vertical)
-                # r(t) = (r_out-fr) + fr*sin(t)   => fr*sin(0)=0, fr*sin(pi/2)=fr => r_out
-                # y(t) = (y0+fr)    - fr*cos(t)   => y0+fr-fr=y0 at t=0, y0+fr at t=pi/2
-                arc_ts      = np.linspace(0.0, np.pi / 2.0, fillet_n + 1)
-                prev_arc_idx = fbase_idx
-                for step in range(1, fillet_n + 1):
-                    t     = arc_ts[step]
-                    r_arc = (r_out - fillet_r) + fillet_r * np.sin(t)
-                    y_arc = (y0   + fillet_r) - fillet_r * np.cos(t)
-                    prev_arc_idx = _ring_stitch(prev_arc_idx, r_arc, y_arc)
-
-                # Outer wall from y0+fillet_r up to y1 (straight, fillet handled the bottom)
-                outer_wall_start_idx = prev_arc_idx  # ring at r_out, y=y0+fr
+                # Quarter-circle arc: (r_out-fr, y0) -> (r_out, y0+fr)
+                # r(t) = (r_out-fr) + fr*sin(t)
+                # y(t) = (y0+fr)    - fr*cos(t)
+                # t=0: r=r_out-fr, y=y0  (tangent horizontal)
+                # t=pi/2: r=r_out, y=y0+fr (tangent vertical)
+                prev_idx = fbase_idx
+                for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
+                    r_arc    = (r_out - fillet_r) + fillet_r * np.sin(t)
+                    y_arc    = (y0   + fillet_r) - fillet_r * np.cos(t)
+                    curr_idx = _ring(r_arc, y_arc)
+                    _stitch(prev_idx, curr_idx, outward=False)  # outward=False -> outer-wall winding
+                    prev_idx = curr_idx
+                # prev_idx is now the ring at (r_out, y0+fillet_r)
                 r_out_y1_idx = _ring(r_out, y1)
-                _stitch(outer_wall_start_idx, r_out_y1_idx, outward=False)  # outer wall quads (outward normal)
-
+                _stitch(prev_idx, r_out_y1_idx, outward=False)  # straight outer wall above fillet
             else:
-                # No fillet: flat bottom goes all the way to r_out
-                so0 = len(vertices)
-                for x, y, z in brim_outer_y0_xyz:
-                    vertices.append([x, y, z]); colors.append(list(mid_gray)); normals.append([0.0, 1.0, 0.0])
-                outer_y0_idx = list(range(so0, so0 + len(brim_outer_y0_xyz)))
+                # No fillet: flat bottom all the way to r_out, then straight outer wall
+                outer_y0_idx = _ring(r_out, y0)
                 _stitch(inner_y0_idx, outer_y0_idx, outward=True)
                 r_out_y1_idx = _ring(r_out, y1)
                 _stitch(outer_y0_idx, r_out_y1_idx, outward=False)
 
-            # Inner wall: r_in from y0 to y1 (straight)
+            # Inner wall: r_in, y0 -> y1
             r_in_y1_idx = _ring(r_in, y1)
             _stitch(inner_y0_idx, r_in_y1_idx, outward=False)
 
-            # Top flat face: r_in -> r_out at y1
+            # Top flat face: r_in -> r_out
             _stitch(r_in_y1_idx, r_out_y1_idx, outward=True)
 
-        # Bottom brim (no fillet needed - bottom face sits on print bed)
+        # Bottom brim (no fillet — bottom face is on the print bed)
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
             r_in  = Rb
             r_out = Rb + p.bottom_brim_thickness
@@ -416,13 +373,12 @@ class LithophaneBuilder:
             )
 
             if p.spokes_enabled and p.spoke_count > 0:
-                r_shade_inner = Rb
                 self._build_spokes(
                     vertices, colors, normals, indices,
                     y_bot=y_bed,
                     y_top=y_bed + float(p.spoke_thickness),
                     r_hub=r_sock_out,
-                    r_rim=r_shade_inner,
+                    r_rim=Rb,
                     n_spokes=p.spoke_count,
                     spoke_w=p.spoke_width,
                     color=mid_gray,
@@ -434,38 +390,6 @@ class LithophaneBuilder:
         C = np.array(colors,   dtype=np.float64)
         return V, I, N, C
 
-    # ------------------------------------------------------------------
-    # top brim helpers (closures can't be defined inside conditionals portably,
-    # so we use a nested helper that captures vertices/colors/normals/indices)
-    # ------------------------------------------------------------------
-    def _brim_ring(self, vertices, colors, normals, indices, mid_gray, r, y, n_pts):
-        """Add a ring of n_pts vertices at radius r, height y. Return index list."""
-        s    = len(vertices)
-        angs = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-        for ang in angs:
-            vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
-            colors.append(list(mid_gray))
-            normals.append([0.0, 1.0, 0.0])
-        return list(range(s, s + n_pts))
-
-    @staticmethod
-    def _stitch_rings_simple(indices, inner_idx, outer_idx, outward=True):
-        """Stitch two equal-length index rings into quads."""
-        n = len(inner_idx)
-        for ii in range(n):
-            jj = (ii + 1) % n
-            a, b = inner_idx[ii], inner_idx[jj]
-            c, d = outer_idx[ii], outer_idx[jj]
-            if outward:
-                indices.append([a, c, b])
-                indices.append([b, c, d])
-            else:
-                indices.append([a, b, c])
-                indices.append([b, d, c])
-
-    # ------------------------------------------------------------------
-    # lamp socket
-    # ------------------------------------------------------------------
     def _build_socket(
         self, vertices, colors, normals, indices,
         y_base, y_top, r_inner, r_outer,
@@ -511,9 +435,6 @@ class LithophaneBuilder:
             quad(rl_top[i],  ri_top[i],  ri_top[j],  rl_top[j])
             quad(ri_top[i],  ro_top[i],  ro_top[j],  ri_top[j])
 
-    # ------------------------------------------------------------------
-    # spokes
-    # ------------------------------------------------------------------
     def _build_spokes(
         self, vertices, colors, normals, indices,
         y_bot, y_top, r_hub, r_rim, n_spokes, spoke_w, color,
@@ -554,9 +475,6 @@ class LithophaneBuilder:
             f(0, 2, 4); f(4, 2, 6)
             f(1, 5, 3); f(5, 7, 3)
 
-    # ------------------------------------------------------------------
-    # sphere builder
-    # ------------------------------------------------------------------
     def _build_sphere(self, imgs):
         p = self.p
         R  = float(p.top_diam) / 2.0
@@ -592,9 +510,6 @@ class LithophaneBuilder:
         return (np.array(vertices, dtype=np.float64), np.array(indices, dtype=np.int32),
                 np.array(normals,  dtype=np.float64), np.array(colors,  dtype=np.float64))
 
-    # ------------------------------------------------------------------
-    # flat builder
-    # ------------------------------------------------------------------
     def _build_flat(self, imgs):
         p = self.p
         W, H = float(p.bottom_diam), float(p.height)
