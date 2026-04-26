@@ -347,10 +347,18 @@ class LithophaneBuilder:
 
     # ------------------------------------------------------------------
     # lamp socket
-    # Tube: y_base (bottom, open) -> y_top (top).
-    # Lip: at the TOP, faces INWARD (narrows the bore like a retaining ring).
-    #      When the fitting is pushed up through the bottom of the shade,
-    #      the lip catches on the fitting collar and stops it pulling out.
+    #
+    # Cross-section (radii, inner=left, outer=right):
+    #
+    #   r_lip  r_inner        r_outer
+    #     |      |              |
+    # y_top +----+--------------+   <- top face (annulus: r_lip -> r_outer)
+    #       |lip |  inner wall  |outer wall
+    # y_lip +----+              |
+    #            |              |
+    # y_base     +--------------+   <- bottom face (annulus: r_inner -> r_outer)
+    #
+    # The inward lip narrows the bore from r_inner down to r_lip over lip_height.
     # ------------------------------------------------------------------
     def _build_socket(
         self, vertices, colors, normals, indices,
@@ -358,10 +366,9 @@ class LithophaneBuilder:
         lip_height, lip_overhang,
         color, n_seg=64,
     ):
-        angles  = np.linspace(0, 2 * np.pi, n_seg, endpoint=False)
-        # Lip sits at the top, protruding INWARD: inner radius shrinks by lip_overhang
-        r_lip   = max(r_inner - lip_overhang, 1.0)   # clamped to at least 1 mm bore
-        y_lip   = y_top - lip_height                  # bottom of the lip collar
+        angles = np.linspace(0, 2 * np.pi, n_seg, endpoint=False)
+        r_lip  = max(r_inner - lip_overhang, 1.0)  # narrowed bore at top
+        y_lip  = y_top - lip_height                 # where lip starts
 
         def add_ring(r, y, nrm_fn):
             start = len(vertices)
@@ -371,95 +378,82 @@ class LithophaneBuilder:
                 normals.append(list(nrm_fn(a)))
             return list(range(start, start + n_seg))
 
-        radial_out = lambda a: [ np.cos(a), 0.0,  np.sin(a)]
-        radial_in  = lambda a: [-np.cos(a), 0.0, -np.sin(a)]
-        face_up    = lambda a: [0.0,  1.0, 0.0]
-        face_dn    = lambda a: [0.0, -1.0, 0.0]
+        up      = lambda a: [0.0,  1.0, 0.0]
+        dn      = lambda a: [0.0, -1.0, 0.0]
+        r_out_n = lambda a: [ np.cos(a), 0.0,  np.sin(a)]
+        r_in_n  = lambda a: [-np.cos(a), 0.0, -np.sin(a)]
 
-        # ---- rings from bottom to top ----
-        ri_base = add_ring(r_inner, y_base, radial_in)   # inner wall, bottom
-        ro_base = add_ring(r_outer, y_base, radial_out)  # outer wall, bottom
-        ri_lip  = add_ring(r_inner, y_lip,  radial_in)   # inner wall at lip base
-        ro_lip  = add_ring(r_outer, y_lip,  radial_out)  # outer wall at lip base
-        # lip collar — inner edge narrows to r_lip
-        rl_bot  = add_ring(r_lip,   y_lip,  face_dn)     # lip inner edge, bottom
-        rl_top  = add_ring(r_lip,   y_top,  face_up)     # lip inner edge, top
-        ri_top  = add_ring(r_inner, y_top,  radial_in)   # inner wall, top
-        ro_top  = add_ring(r_outer, y_top,  radial_out)  # outer wall, top
+        # All rings needed (bottom to top)
+        ri_base = add_ring(r_inner, y_base, r_in_n)  # inner wall, bottom
+        ro_base = add_ring(r_outer, y_base, r_out_n) # outer wall, bottom
+        ri_lip  = add_ring(r_inner, y_lip,  r_in_n)  # inner wall, lip base
+        ro_lip  = add_ring(r_outer, y_lip,  r_out_n) # outer wall, lip base (same y)
+        rl_lip  = add_ring(r_lip,   y_lip,  dn)      # lip inner edge, bottom face
+        rl_top  = add_ring(r_lip,   y_top,  r_in_n)  # lip inner edge (bore surface)
+        ri_top  = add_ring(r_inner, y_top,  up)       # inner wall, top (upward-facing)
+        ro_top  = add_ring(r_outer, y_top,  up)       # outer wall, top (upward-facing)
 
         def quad(a, b, c, d):
-            """Two triangles forming a quad, CCW winding."""
+            """Two CCW triangles covering quad a-b-c-d."""
             indices.append([a, b, c])
             indices.append([a, c, d])
 
         for i in range(n_seg):
             j = (i + 1) % n_seg
 
-            # Outer wall: full height y_base -> y_top
+            # --- outer cylindrical wall: y_base -> y_top ---
             quad(ro_base[i], ro_top[i], ro_top[j], ro_base[j])
 
-            # Inner wall: y_base -> y_lip (below the lip)
+            # --- inner wall below lip: y_base -> y_lip ---
             quad(ri_lip[j], ri_base[j], ri_base[i], ri_lip[i])
 
-            # Bottom annulus cap (open bottom of tube)
-            quad(ri_base[i], ro_base[i], ro_base[j], ri_base[j])
+            # --- bottom annulus cap (faces down): r_inner -> r_outer ---
+            quad(ro_base[i], ri_base[i], ri_base[j], ro_base[j])
 
-            # Lip section — inward collar at the top
-            # Inner face of lip (the narrowed bore surface): y_lip -> y_top
-            quad(rl_bot[j], rl_top[j], rl_top[i], rl_bot[i])
-            # Lip bottom annulus (horizontal face at y_lip, from r_lip to r_inner)
-            quad(rl_bot[i], ri_lip[i], ri_lip[j], rl_bot[j])
-            # Lip top annulus cap (horizontal face at y_top, from r_lip to r_outer)
-            quad(ro_top[i], ri_top[i], rl_top[i], ro_top[j])   # outer arc
-            quad(ri_top[i], rl_top[i], rl_top[j], ri_top[j])   # inner arc to lip
-            # Outer wall section from y_lip to y_top already covered above.
-            # Inner wall section from y_lip to y_top (between r_inner and r_lip)
-            quad(ri_lip[i], ri_top[i], ri_top[j], ri_lip[j])
+            # --- lip inner bore surface: y_lip -> y_top ---
+            quad(rl_lip[j], rl_top[j], rl_top[i], rl_lip[i])
+
+            # --- lip bottom annulus (faces down): r_lip -> r_inner at y_lip ---
+            quad(ri_lip[i], rl_lip[i], rl_lip[j], ri_lip[j])
+
+            # --- top face (faces up): full annulus r_lip -> r_outer at y_top ---
+            # Split into two rings: r_lip->r_inner and r_inner->r_outer
+            quad(rl_top[i], ri_top[i], ri_top[j], rl_top[j])   # inner annulus strip
+            quad(ri_top[i], ro_top[i], ro_top[j], ri_top[j])   # outer annulus strip
 
     # ------------------------------------------------------------------
-    # spokes  — uniform rectangular cross-section all the way along
+    # spokes - uniform rectangular cross-section
     # ------------------------------------------------------------------
     def _build_spokes(
         self, vertices, colors, normals, indices,
         y, r_hub, r_rim, n_spokes, spoke_w, spoke_t, color,
     ):
-        """
-        Flat rectangular spokes radiating from r_hub to r_rim at height y.
-        spoke_w is the CONSTANT tangential width in mm at every radius —
-        so the same number of mm wide at the hub end and the rim end.
-        spoke_t is the vertical thickness in mm.
-        """
         y_bot      = y
         y_top      = y + spoke_t
         angle_step = 2.0 * np.pi / n_spokes
-        half_w     = spoke_w / 2.0  # half-width in mm (Cartesian, not angular)
+        half_w     = spoke_w / 2.0
 
         for k in range(n_spokes):
             a_ctr = k * angle_step
-            # Unit tangent direction at this spoke centre
-            tx = -np.sin(a_ctr)   # tangent x
-            tz =  np.cos(a_ctr)   # tangent z
-            # Unit radial direction
+            tx = -np.sin(a_ctr)
+            tz =  np.cos(a_ctr)
             rx =  np.cos(a_ctr)
             rz =  np.sin(a_ctr)
 
-            # The four lateral offsets in world-space (±half_w along tangent)
-            # Combined with the two radii and two y values -> 8 corners
             def pt(r, side, yy):
-                # side = +1 or -1 selects left/right in tangential direction
                 cx = r * rx + side * half_w * tx
                 cz = r * rz + side * half_w * tz
                 return [cx, yy, cz]
 
             corners = [
-                pt(r_hub, -1, y_bot),  # 0 hub-left-bot
-                pt(r_hub, +1, y_bot),  # 1 hub-right-bot
-                pt(r_rim, -1, y_bot),  # 2 rim-left-bot
-                pt(r_rim, +1, y_bot),  # 3 rim-right-bot
-                pt(r_hub, -1, y_top),  # 4 hub-left-top
-                pt(r_hub, +1, y_top),  # 5 hub-right-top
-                pt(r_rim, -1, y_top),  # 6 rim-left-top
-                pt(r_rim, +1, y_top),  # 7 rim-right-top
+                pt(r_hub, -1, y_bot),  # 0
+                pt(r_hub, +1, y_bot),  # 1
+                pt(r_rim, -1, y_bot),  # 2
+                pt(r_rim, +1, y_bot),  # 3
+                pt(r_hub, -1, y_top),  # 4
+                pt(r_hub, +1, y_top),  # 5
+                pt(r_rim, -1, y_top),  # 6
+                pt(r_rim, +1, y_top),  # 7
             ]
 
             base = len(vertices)
@@ -471,18 +465,12 @@ class LithophaneBuilder:
             def f(a, b, c):
                 indices.append([base + a, base + b, base + c])
 
-            # top face  (y+)
-            f(4, 6, 5); f(5, 6, 7)
-            # bottom face (y-)
-            f(0, 1, 2); f(1, 3, 2)
-            # inner (hub) face
-            f(0, 4, 1); f(4, 5, 1)
-            # outer (rim) face
-            f(2, 3, 6); f(3, 7, 6)
-            # left side
-            f(0, 2, 4); f(4, 2, 6)
-            # right side
-            f(1, 5, 3); f(5, 7, 3)
+            f(4, 6, 5); f(5, 6, 7)  # top
+            f(0, 1, 2); f(1, 3, 2)  # bottom
+            f(0, 4, 1); f(4, 5, 1)  # hub face
+            f(2, 3, 6); f(3, 7, 6)  # rim face
+            f(0, 2, 4); f(4, 2, 6)  # left side
+            f(1, 5, 3); f(5, 7, 3)  # right side
 
     # ------------------------------------------------------------------
     # sphere builder
