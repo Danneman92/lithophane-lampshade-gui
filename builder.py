@@ -148,47 +148,53 @@ class LithophaneBuilder:
 
         # ------------------------------------------------------------------
         # Top brim
+        #
         # Prints upside-down: y=H is on the bed, y=H+brim_height is the top.
-        # Fillet is on the BOTTOM-OUTER corner (r_out, y=H) — the edge that
-        # would otherwise be a sharp 90-deg overhang in mid-air.
-        # Arc sweeps from horizontal (tangent to bottom face) to vertical
-        # (tangent to outer wall), always <= 45 deg from horizontal.
+        # The brim is a hollow ring: inner radius r_in=Rt, outer radius r_out.
+        #
+        # Faces:
+        #   bottom face  : flat annulus at y=H, r_in -> r_out (faces down, toward bed)
+        #                   the OUTER edge of this face gets a quarter-circle fillet
+        #                   to eliminate the sharp 90-deg overhang
+        #   outer wall   : cylinder at r_out, y=H+fillet_r -> y=y1  (above fillet end)
+        #   inner wall   : cylinder at r_in, y=H -> y=y1
+        #   top face     : flat annulus at y=y1, r_in -> r_out (faces up)
+        #
+        # Fillet arc (bottom-outer corner):
+        #   centre at (r_out-fr, y=H+fr)
+        #   t=0:    (r_out-fr, H)      tangent horizontal — flush with bottom face
+        #   t=pi/2: (r_out,    H+fr)   tangent vertical   — flush with outer wall
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
             r_out    = Rt + p.top_brim_thickness
             y0       = H
             y1       = H + p.top_brim_height
-            fillet_r = float(p.top_brim_fillet)
+            fillet_r = min(
+                float(p.top_brim_fillet),
+                p.top_brim_thickness / 2.0,
+                p.top_brim_height    / 2.0,
+            )
             fillet_r = max(fillet_r, 0.0)
             fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
             n_pts    = ncols * num_panels
 
-            # --- local helpers (closures over vertices/colors/normals/indices) ---
-            def _panel_ring(r, y, normal_type='up'):
-                """Add n_pts vertices at radius r, height y. Return index list.
-                   normal_type: 'up' for top faces, 'down' for bottom faces,
-                   'outward' for outer walls, 'inward' for inner walls.
-                """
+            def _ring(r, y):
+                """Add n_pts vertices at radius r, height y. Return index list."""
                 s = len(vertices)
-                angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-                for ang in angles:
-                    x = r * np.cos(ang)
-                    z = r * np.sin(ang)
-                    vertices.append([x, y, z])
+                for ang in np.linspace(0, 2 * np.pi, n_pts, endpoint=False):
+                    vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
                     colors.append(list(mid_gray))
-                    if normal_type == 'outward':
-                        normals.append([np.cos(ang), 0.0, np.sin(ang)])
-                    elif normal_type == 'inward':
-                        normals.append([-np.cos(ang), 0.0, -np.sin(ang)])
-                    elif normal_type == 'down':
-                        normals.append([0.0, -1.0, 0.0])
-                    else:  # 'up' or default
-                        normals.append([0.0, 1.0, 0.0])
+                    normals.append([0.0, 1.0, 0.0])
                 return list(range(s, s + n_pts))
 
             def _stitch(inner_idx, outer_idx, outward=True):
-                """Quad-strip two equal-length rings."""
+                """Quad-strip two same-length rings.
+                   outward=True  -> face normal points away from axis (top/bottom faces,
+                                    and outer wall viewed from outside)
+                   outward=False -> face normal points toward axis (inner wall, and
+                                    outer wall winding when inner_idx is the lower ring)
+                """
                 n = len(inner_idx)
                 for ii in range(n):
                     jj = (ii + 1) % n
@@ -201,53 +207,50 @@ class LithophaneBuilder:
                         indices.append([a, b, c])
                         indices.append([b, d, c])
 
-            # shade-top edge -> brim inner ring at y0
-            brim_inner_y0_xyz = []
-            inner_y0_angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-            for ang in inner_y0_angles:
-                brim_inner_y0_xyz.append([r_in * np.cos(ang), y0, r_in * np.sin(ang)])
-            si0 = len(vertices)
-            for i, (x, y, z) in enumerate(brim_inner_y0_xyz):
-                vertices.append([x, y, z]); colors.append(list(mid_gray))
-                normals.append([0.0, 1.0, 0.0])  # Top surface normal
-            inner_y0_idx = list(range(si0, si0 + len(brim_inner_y0_xyz)))
+            # ------ bottom face: shade-top ring -> inner brim ring at y0 ----------
+            # Build inner ring at y0 using uniform angles (same n_pts as _ring)
+            inner_y0_idx = _ring(r_in, y0)
             stitch_rings(indices, top_outer_ring, inner_y0_idx, outward=True)
 
+            # ------ bottom annulus + fillet/outer wall ---------------------------
             if fillet_r > 0:
-                # Flat bottom annulus: r_in -> r_out-fillet_r  (fillet takes the corner)
-                fbase_idx    = _panel_ring(r_out - fillet_r, y0, normal_type='down')
-                _stitch(inner_y0_idx, fbase_idx, outward=True)
+                # Flat bottom from r_in to r_out-fr
+                fbase_idx = _ring(r_out - fillet_r, y0)
+                _stitch(inner_y0_idx, fbase_idx, outward=True)   # bottom face, upward normal
 
-                # Quarter-circle arc: (r_out-fr, y0) -> (r_out, y0+fr)
-                # r(t) = (r_out-fr) + fr*sin(t)
-                # y(t) = (y0+fr)    - fr*cos(t)
-                # t=0: r=r_out-fr, y=y0  (tangent horizontal)
-                # t=pi/2: r=r_out, y=y0+fr (tangent vertical)
+                # Fillet arc from (r_out-fr, y0) sweeping to (r_out, y0+fr)
                 prev_idx = fbase_idx
                 for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
                     r_arc    = (r_out - fillet_r) + fillet_r * np.sin(t)
                     y_arc    = (y0   + fillet_r) - fillet_r * np.cos(t)
-                    curr_idx = _panel_ring(r_arc, y_arc, normal_type='outward')
-                    _stitch(prev_idx, curr_idx, outward=False)  # outward=False -> outer-wall winding
+                    curr_idx = _ring(r_arc, y_arc)
+                    # Arc faces outward, but we stitch bottom-ring -> top-ring;
+                    # for an outward-facing curved wall: lower ring is "inner",
+                    # upper ring is "outer" in the _stitch sense
+                    _stitch(prev_idx, curr_idx, outward=True)
                     prev_idx = curr_idx
-                # prev_idx is now the ring at (r_out, y0+fillet_r)
-                r_out_y1_idx = _panel_ring(r_out, y1, normal_type='outward')
-                _stitch(prev_idx, r_out_y1_idx, outward=False)  # straight outer wall above fillet
+                # prev_idx is now at (r_out, y0+fillet_r)
+
+                # Straight outer wall from y0+fr up to y1
+                outer_top_idx = _ring(r_out, y1)
+                _stitch(prev_idx, outer_top_idx, outward=True)   # outer wall, upward in _stitch = outward-facing
+
             else:
-                # No fillet: flat bottom all the way to r_out, then straight outer wall
-                outer_y0_idx = _panel_ring(r_out, y0, normal_type='down')
-                _stitch(inner_y0_idx, outer_y0_idx, outward=True)
-                r_out_y1_idx = _panel_ring(r_out, y1, normal_type='outward')
-                _stitch(outer_y0_idx, r_out_y1_idx, outward=False)
+                # No fillet: flat bottom all the way to r_out
+                outer_y0_idx  = _ring(r_out, y0)
+                _stitch(inner_y0_idx, outer_y0_idx, outward=True)  # bottom face
+                outer_top_idx = _ring(r_out, y1)
+                _stitch(outer_y0_idx, outer_top_idx, outward=True)  # outer wall
 
-            # Inner wall: r_in, y0 -> y1
-            r_in_y1_idx = _panel_ring(r_in, y1, normal_type='inward')
-            _stitch(inner_y0_idx, r_in_y1_idx, outward=False)
+            # ------ inner wall: r_in, y0 -> y1 ----------------------------------
+            inner_top_idx = _ring(r_in, y1)
+            # Inner wall faces inward: stitch with outward=False so winding flips
+            _stitch(inner_y0_idx, inner_top_idx, outward=False)
 
-            # Top flat face: r_in -> r_out (with upward normals)
-            r_in_y1_top_idx = _panel_ring(r_in, y1, normal_type='up')
-            r_out_y1_top_idx = _panel_ring(r_out, y1, normal_type='up')
-            _stitch(r_in_y1_top_idx, r_out_y1_top_idx, outward=True)
+            # ------ top face: r_in -> r_out at y1 --------------------------------
+            # Reuse the same rings that cap the inner and outer walls.
+            # inner_top_idx is at (r_in, y1), outer_top_idx is at (r_out, y1).
+            _stitch(inner_top_idx, outer_top_idx, outward=True)
 
         # Bottom brim (no fillet — bottom face is on the print bed)
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
