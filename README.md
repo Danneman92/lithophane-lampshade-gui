@@ -7,9 +7,9 @@ A PyQt5 / OpenGL desktop application for generating 3-D printable lithophane lam
 - **Three shade types** – Normal (cone/cylinder), Sphere, Flat panel
 - **Multi-panel** – 1–12 panels, each with its own photo
 - **Top & bottom brims** – configurable height and radial thickness
-- **Frames / pillars** – vertical separators between panels, now sitting *flush* against the lithophane surface (no gap)
-- **Sprocket teeth** – optional snap-together teeth on the top brim ring (tooth count, height, arc-width all configurable)
-- **Lamp socket adapter** – optional hollow cylinder above the top brim that slides over the bulb fitting (bore diameter, wall thickness, height all configurable; default 26 mm bore suits E27)
+- **Frames / pillars** – vertical separators between panels, sitting *flush* against the lithophane surface (no gap)
+- **Lamp socket adapter** – hollow cylinder that sits *inside* the shade with its bottom flush with the shade bottom. Slides over the bulb fitting. Includes a configurable outward lip (stop collar) so it cannot be pushed up through the fitting
+- **Spokes** – optional radial ribs bridging the socket tube to the inner shade wall
 - **Live 3-D preview** – drag to rotate, scroll to zoom, hi/lo-res swap during interaction
 - **Binary STL export**
 
@@ -28,23 +28,34 @@ python app.py
 - Pillow ≥ 8.0
 - PyOpenGL ≥ 3.1
 
-## Frame gap fix
-
-The previous version used a `clearance` offset so frames floated away from the panel surface.
-The new version samples the actual outer-shell radius at each pillar height and places the
-inner face directly against it — zero gap by default.
-
-## Sprocket teeth
-
-Enable in the **Sprocket Teeth** panel. Print two matching rings with `tooth_w_frac ≈ 0.45`
-so teeth and gaps are nearly equal — they snap together to hold the lampshade segments in alignment.
-
 ## Lamp socket adapter
 
-Enable in the **Lamp Socket Adapter** panel. Set **Inner Bore Diam** to match your bulb holder:
-- E27 standard neck ≈ 26 mm
-- E14 small screw ≈ 17 mm
-- GU10 bayonet ≈ 25 mm
+Enable in the **Lamp Socket Adapter** group.
 
-The adapter rises above the top brim and grips the fitting by friction fit.
-Increase **Wall Thickness** (default 2.5 mm) for a stiffer grip.
+| Parameter | Description |
+|---|---|
+| Inner Bore Diam | Match your bulb holder: E27 ≈ 26 mm, E14 ≈ 17 mm, GU10 ≈ 25 mm |
+| Wall Thickness | Default 2.5 mm |
+| Adapter Height | How far the tube reaches up inside the shade (default 60 mm) |
+| Lip Height | Height of the stop-collar at the bottom (default 4 mm) |
+| Lip Overhang | How far the collar flares outward beyond the tube wall (default 4 mm) |
+
+The socket bottom is at **y = 0** (same plane as the shade bottom), so the lip rests on the bulb fitting housing and the tube points upward into the shade.
+
+## Spokes
+
+Enable in the same **Lamp Socket Adapter** group.
+Spokes are flat rectangular ribs at y = 0 that radiate from the socket tube outward
+to the inner wall of the shade.
+
+| Parameter | Description |
+|---|---|
+| Spoke Count | Number of equally-spaced spokes (default 4) |
+| Spoke Width | Tangential width of each spoke in mm (default 4 mm) |
+| Spoke Thickness | Vertical thickness of each spoke in mm (default 2 mm) |
+
+## Frame gap fix
+
+The previous version used a clearance offset so frames floated away from the panel surface.
+The new version samples the actual outer-shell radius and places the inner face directly
+against it — zero gap by default.
