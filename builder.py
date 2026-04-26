@@ -159,23 +159,32 @@ class LithophaneBuilder:
             r_out    = Rt + p.top_brim_thickness
             y0       = H
             y1       = H + p.top_brim_height
-            fillet_r = min(
-                float(p.top_brim_fillet),
-                p.top_brim_thickness / 2.0,
-                p.top_brim_height    / 2.0,
-            )
+            fillet_r = float(p.top_brim_fillet)
             fillet_r = max(fillet_r, 0.0)
             fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
             n_pts    = ncols * num_panels
 
             # --- local helpers (closures over vertices/colors/normals/indices) ---
-            def _ring(r, y):
-                """Add n_pts vertices at radius r, height y. Return index list."""
+            def _panel_ring(r, y, normal_type='up'):
+                """Add n_pts vertices at radius r, height y. Return index list.
+                   normal_type: 'up' for top faces, 'down' for bottom faces,
+                   'outward' for outer walls, 'inward' for inner walls.
+                """
                 s = len(vertices)
-                for ang in np.linspace(0, 2 * np.pi, n_pts, endpoint=False):
-                    vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
+                angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+                for ang in angles:
+                    x = r * np.cos(ang)
+                    z = r * np.sin(ang)
+                    vertices.append([x, y, z])
                     colors.append(list(mid_gray))
-                    normals.append([0.0, 1.0, 0.0])
+                    if normal_type == 'outward':
+                        normals.append([np.cos(ang), 0.0, np.sin(ang)])
+                    elif normal_type == 'inward':
+                        normals.append([-np.cos(ang), 0.0, -np.sin(ang)])
+                    elif normal_type == 'down':
+                        normals.append([0.0, -1.0, 0.0])
+                    else:  # 'up' or default
+                        normals.append([0.0, 1.0, 0.0])
                 return list(range(s, s + n_pts))
 
             def _stitch(inner_idx, outer_idx, outward=True):
@@ -193,16 +202,20 @@ class LithophaneBuilder:
                         indices.append([b, d, c])
 
             # shade-top edge -> brim inner ring at y0
-            brim_inner_y0_xyz = build_ring_xyz_at_radius(r_in, y0, ncols, num_panels, panels_present)
+            brim_inner_y0_xyz = []
+            inner_y0_angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+            for ang in inner_y0_angles:
+                brim_inner_y0_xyz.append([r_in * np.cos(ang), y0, r_in * np.sin(ang)])
             si0 = len(vertices)
-            for x, y, z in brim_inner_y0_xyz:
-                vertices.append([x, y, z]); colors.append(list(mid_gray)); normals.append([0.0, 1.0, 0.0])
+            for i, (x, y, z) in enumerate(brim_inner_y0_xyz):
+                vertices.append([x, y, z]); colors.append(list(mid_gray))
+                normals.append([0.0, 1.0, 0.0])  # Top surface normal
             inner_y0_idx = list(range(si0, si0 + len(brim_inner_y0_xyz)))
             stitch_rings(indices, top_outer_ring, inner_y0_idx, outward=True)
 
             if fillet_r > 0:
                 # Flat bottom annulus: r_in -> r_out-fillet_r  (fillet takes the corner)
-                fbase_idx    = _ring(r_out - fillet_r, y0)
+                fbase_idx    = _panel_ring(r_out - fillet_r, y0, normal_type='down')
                 _stitch(inner_y0_idx, fbase_idx, outward=True)
 
                 # Quarter-circle arc: (r_out-fr, y0) -> (r_out, y0+fr)
@@ -214,25 +227,27 @@ class LithophaneBuilder:
                 for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
                     r_arc    = (r_out - fillet_r) + fillet_r * np.sin(t)
                     y_arc    = (y0   + fillet_r) - fillet_r * np.cos(t)
-                    curr_idx = _ring(r_arc, y_arc)
+                    curr_idx = _panel_ring(r_arc, y_arc, normal_type='outward')
                     _stitch(prev_idx, curr_idx, outward=False)  # outward=False -> outer-wall winding
                     prev_idx = curr_idx
                 # prev_idx is now the ring at (r_out, y0+fillet_r)
-                r_out_y1_idx = _ring(r_out, y1)
+                r_out_y1_idx = _panel_ring(r_out, y1, normal_type='outward')
                 _stitch(prev_idx, r_out_y1_idx, outward=False)  # straight outer wall above fillet
             else:
                 # No fillet: flat bottom all the way to r_out, then straight outer wall
-                outer_y0_idx = _ring(r_out, y0)
+                outer_y0_idx = _panel_ring(r_out, y0, normal_type='down')
                 _stitch(inner_y0_idx, outer_y0_idx, outward=True)
-                r_out_y1_idx = _ring(r_out, y1)
+                r_out_y1_idx = _panel_ring(r_out, y1, normal_type='outward')
                 _stitch(outer_y0_idx, r_out_y1_idx, outward=False)
 
             # Inner wall: r_in, y0 -> y1
-            r_in_y1_idx = _ring(r_in, y1)
+            r_in_y1_idx = _panel_ring(r_in, y1, normal_type='inward')
             _stitch(inner_y0_idx, r_in_y1_idx, outward=False)
 
-            # Top flat face: r_in -> r_out
-            _stitch(r_in_y1_idx, r_out_y1_idx, outward=True)
+            # Top flat face: r_in -> r_out (with upward normals)
+            r_in_y1_top_idx = _panel_ring(r_in, y1, normal_type='up')
+            r_out_y1_top_idx = _panel_ring(r_out, y1, normal_type='up')
+            _stitch(r_in_y1_top_idx, r_out_y1_top_idx, outward=True)
 
         # Bottom brim (no fillet — bottom face is on the print bed)
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
@@ -292,9 +307,7 @@ class LithophaneBuilder:
 
                 y_bot = -p.bottom_brim_height if p.bottom_brim_height > 0 else 0.0
                 y_top = H + p.top_brim_height  if p.top_brim_height  > 0 else H
-                ys_clamped = np.clip(
-                    np.linspace(y_bot, y_top, steps + 2, dtype=np.float64), 0.0, H
-                )
+                ys_clamped = np.linspace(y_bot, y_top, steps + 2, dtype=np.float64)
 
                 pillar_base = len(vertices)
                 for y_val in ys_clamped:
