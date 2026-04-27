@@ -110,7 +110,7 @@ class LithophaneBuilder:
                     indices.append([a, b, c])
                     indices.append([b, d, c])
 
-            # top_outer_ring: j goes ncols-1 down to 0 (decreasing angle)
+            # top_outer_ring: j decreases (ncols-1 -> 0) = decreasing angle per panel
             top_outer_ring.extend([base + 0 * ncols + j for j in range(ncols - 1, -1, -1)])
             bot_outer_ring.extend([base + (nrows - 1) * ncols + j for j in range(ncols - 1, -1, -1)])
 
@@ -150,12 +150,12 @@ class LithophaneBuilder:
         # ------------------------------------------------------------------
         # Top brim
         #
-        # ALL rings are built with the same _brim_ring helper so every ring
-        # has exactly n_brim points in the same angular order.  We then use
-        # _stitch (not stitch_rings) throughout so winding is consistent.
-        #
-        # The one join to the panel shell uses stitch_rings with a dedicated
-        # seam_ring that matches top_outer_ring length exactly.
+        # top_outer_ring is built with j decreasing (ncols-1 -> 0) per panel,
+        # so within each panel block the angle DECREASES.
+        # _brim_ring must use the SAME layout: for each present panel, iterate
+        # j from ncols-1 down to 0 so the angular order matches exactly.
+        # That way _stitch pairs vertex k of ring_a with vertex k of ring_b
+        # correctly for every quad.
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
@@ -167,25 +167,29 @@ class LithophaneBuilder:
             fillet_r = max(fillet_r, 0.0)
             fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
 
-            # Use same point count as the panel top rings so stitch_rings works
-            n_present = sum(panels_present)
-            n_brim = ncols * n_present
-
             def _brim_ring(r, y):
-                """Uniform ring with n_brim points, CCW when viewed from +Y."""
+                """
+                Ring with the same winding as top_outer_ring:
+                for each present panel, angle DECREASES (j from ncols-1 to 0).
+                """
                 s = len(vertices)
-                for k in range(n_brim):
-                    ang = 2.0 * np.pi * k / n_brim
-                    vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
-                    colors.append(list(mid_gray))
-                    normals.append([0.0, 1.0, 0.0])
-                return list(range(s, s + n_brim))
+                for p_idx, present in enumerate(panels_present):
+                    if not present:
+                        continue
+                    for j in range(ncols - 1, -1, -1):
+                        u_prime = 1.0 - (j / float(ncols - 1))
+                        ang = p_idx * theta_step + u_prime * theta_step
+                        vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
+                        colors.append(list(mid_gray))
+                        normals.append([0.0, 1.0, 0.0])
+                n = len(vertices) - s
+                return list(range(s, s + n))
 
             def _stitch(ring_a, ring_b, flip=False):
                 """
-                Stitch two same-length rings into quads.
-                Default (flip=False): face normal points upward / outward.
-                flip=True: reverse winding.
+                Stitch two equal-length rings into quads.
+                flip=False -> normal faces outward/upward.
+                flip=True  -> reversed winding.
                 """
                 n = len(ring_a)
                 for i in range(n):
@@ -199,51 +203,45 @@ class LithophaneBuilder:
                         indices.append([a, b, c])
                         indices.append([b, d, c])
 
-            # -- seam: connect panel outer shell top edge to brim inner ring --
-            # top_outer_ring has n_brim vertices (ncols per present panel,
-            # reversed per panel).  Build a matching inner ring and stitch.
+            # Seam: connect panel outer shell top edge to brim inner ring.
+            # Both top_outer_ring and inner_y0 now share the same angular order
+            # so stitch_rings(inner, outer, outward=True) pairs them correctly.
             inner_y0 = _brim_ring(r_in, y0)
-            # top_outer_ring winding: decreasing angle per panel block.
-            # inner_y0 winding: increasing angle (CCW).
-            # stitch_rings(inner, outer) with outward=True pairs them correctly
-            # when inner has smaller radius — but our windings are opposite.
-            # Instead we _stitch inner_y0 (increasing) vs top_outer_ring (decreasing)
-            # with flip=True to compensate.
-            _stitch(inner_y0, top_outer_ring, flip=True)
+            stitch_rings(indices, inner_y0, top_outer_ring, outward=True)
 
             if fillet_r > 0:
-                # flat bottom annulus: r_in -> fillet_start
+                # flat bottom annulus: r_in -> fillet start
                 fbase = _brim_ring(r_out - fillet_r, y0)
-                _stitch(inner_y0, fbase)            # flat bottom face, normal up
+                _stitch(inner_y0, fbase)          # bottom face, normal up
 
-                # quarter-circle fillet (bottom-outer corner, sweeping outward+upward)
+                # quarter-circle fillet sweeping outward and upward
                 prev = fbase
                 for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
                     r_arc = (r_out - fillet_r) + fillet_r * np.sin(t)
                     y_arc = y0 + fillet_r - fillet_r * np.cos(t)
                     curr  = _brim_ring(r_arc, y_arc)
-                    _stitch(prev, curr)              # normal outward, winding correct
+                    _stitch(prev, curr)            # outward face
                     prev = curr
 
                 # straight outer wall from top of fillet to y1
                 outer_y1 = _brim_ring(r_out, y1)
-                _stitch(prev, outer_y1)              # outer wall going up
+                _stitch(prev, outer_y1)            # outer wall going up
             else:
-                # no fillet: straight outer wall from y0 to y1
+                # no fillet: straight outer wall y0 -> y1
                 outer_y0 = _brim_ring(r_out, y0)
-                _stitch(inner_y0, outer_y0)          # flat bottom face
+                _stitch(inner_y0, outer_y0)        # bottom face
                 outer_y1 = _brim_ring(r_out, y1)
-                _stitch(outer_y0, outer_y1)          # outer wall
+                _stitch(outer_y0, outer_y1)        # outer wall
 
-            # inner wall: r_in from y0 to y1 (normal points inward = flip)
+            # inner wall: r_in from y0 up to y1 (normal points inward, so flip)
             inner_y1 = _brim_ring(r_in, y1)
-            _stitch(inner_y1, inner_y0, flip=False)  # inner wall, normal inward
+            _stitch(inner_y1, inner_y0, flip=False)  # inner wall
 
             # top face annulus: r_in -> r_out at y1, normal up
             _stitch(inner_y1, outer_y1)
 
         # ------------------------------------------------------------------
-        # Bottom brim (no fillet — sits on print bed)
+        # Bottom brim
         # ------------------------------------------------------------------
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
             r_in  = Rb
@@ -348,8 +346,8 @@ class LithophaneBuilder:
                     pillar_radii_by_level.append((r_in_left, r_in_right, r_out_common))
 
                     for idx, (r, theta) in enumerate([
-                        (r_in_left,   theta_left),
-                        (r_in_right,  theta_right),
+                        (r_in_left,    theta_left),
+                        (r_in_right,   theta_right),
                         (r_out_common, theta_left),
                         (r_out_common, theta_right),
                     ]):
