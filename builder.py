@@ -394,20 +394,24 @@ class LithophaneBuilder:
                     normals.append([0.0, 1.0, 0.0])
                 indices.append([ct+0, ct+2, ct+1]); indices.append([ct+1, ct+2, ct+3])
 
-                # Pillar outer radius at y=H (top of shade)
-                pillar_r_top = pillar_radii_by_level[-1][2]
+                # Pillar inner radii and outer radius at y=H (top of shade)
+                pillar_r_in_left_top  = pillar_radii_by_level[-1][0]
+                pillar_r_in_right_top = pillar_radii_by_level[-1][1]
+                pillar_r_top          = pillar_radii_by_level[-1][2]
 
                 # --------------------------------------------------------------
                 # TOP BRIM FILLER
-                # Fills the gap between the pillar outer face and the fillet.
-                # Strategy: build a solid wedge whose outer profile traces:
-                #   - horizontal flat from pillar_r_top to arc start (r_out-fillet_r) at y=H
-                #   - then up the fillet arc to (r_out, y=y0+fillet_r)
-                #   - then vertical to y=y1
-                # Inner wall stays at r=Rt throughout (same as brim inner).
-                # NO bottom or top horizontal caps - those planes are already
-                # covered by the brim ring geometry, so no coplanar faces.
-                # Only side walls are added.
+                # Fills the gap between the pillar top face and the fillet/brim.
+                #
+                # FIX: The first row now uses the actual pillar inner radii at
+                # y=H (r_in_left / r_in_right) so the filler inner wall is flush
+                # with the pillar inner face — closing the gap that previously
+                # appeared between the pillar inner edge and the brim fillet.
+                # Subsequent rows use Rt (the true brim inner radius).
+                #
+                # Outer profile traces the fillet arc from pillar_r_top upward,
+                # then vertical to y1.  Inner transitions from pillar inner radii
+                # at y=H to Rt for all rows above y=H.
                 # --------------------------------------------------------------
                 if has_top_brim:
                     tb_r_in = Rt
@@ -435,11 +439,15 @@ class LithophaneBuilder:
                         outer_profile.append((tb_r_out, tb_y0))
                         outer_profile.append((tb_r_out, tb_y1))
 
-                    # Helper: add a row of 4 verts (iL, iR, oL, oR) at given r_inner, r_outer, y
-                    def _row(r_i, r_o, yv):
+                    # Helper: add a row of 4 verts (iL, iR, oL, oR)
+                    # r_i_left / r_i_right allow asymmetric inner radii (used
+                    # only for the first row to match the pillar inner faces).
+                    def _row(r_i_left, r_i_right, r_o, yv):
                         base_r = len(vertices)
-                        for r, th in [(r_i, theta_left), (r_i, theta_right),
-                                      (r_o, theta_left), (r_o, theta_right)]:
+                        for r, th in [(r_i_left,  theta_left),
+                                      (r_i_right, theta_right),
+                                      (r_o,       theta_left),
+                                      (r_o,       theta_right)]:
                             vertices.append([r*np.cos(th), yv, r*np.sin(th)])
                             colors.append([0.55, 0.55, 0.55])
                             normals.append([0.0, 1.0, 0.0])
@@ -456,28 +464,53 @@ class LithophaneBuilder:
                         # right side
                         indices.append([b0+3, b0+1, b1+3]); indices.append([b0+1, b1+1, b1+3])
 
-                    # Build rows along the outer profile
+                    # Build rows along the outer profile.
+                    # Row 0 (at y=H): use actual pillar inner radii to be flush
+                    # with the pillar top inner edge.
+                    # All subsequent rows: use tb_r_in (=Rt) for the inner edge.
                     rows = []
-                    for r_o, yv in outer_profile:
-                        rows.append(_row(tb_r_in, r_o, yv))
+                    for i, (r_o, yv) in enumerate(outer_profile):
+                        if i == 0:
+                            rows.append(_row(pillar_r_in_left_top,
+                                             pillar_r_in_right_top,
+                                             r_o, yv))
+                        else:
+                            rows.append(_row(tb_r_in, tb_r_in, r_o, yv))
 
                     # Stitch side walls between consecutive rows
                     for i in range(len(rows)-1):
                         _walls(rows[i], rows[i+1])
 
-                    # Top cap at y=y1 (normal UP) - this plane has no brim face, safe to add
+                    # Top cap at y=y1 (normal UP)
                     top_row = rows[-1]
                     indices.append([top_row+0, top_row+2, top_row+1])
                     indices.append([top_row+1, top_row+2, top_row+3])
 
-                    # Bottom is at y=H - the brim inner bottom face already covers this plane,
-                    # so we do NOT add a cap here to avoid coplanar overlap.
+                    # Bottom horizontal cap at y=H (normal DOWN).
+                    # This closes the gap between the pillar top inner edge
+                    # and the brim inner ring at the same height.
+                    # Only needed when the pillar inner radii differ from Rt.
+                    r_in_avg = (pillar_r_in_left_top + pillar_r_in_right_top) * 0.5
+                    if r_in_avg > tb_r_in + 1e-4:
+                        bot_row = rows[0]
+                        cb2 = len(vertices)
+                        for ci in range(4):
+                            vertices.append(list(vertices[bot_row + ci]))
+                            colors.append([0.55, 0.55, 0.55])
+                            normals.append([0.0, -1.0, 0.0])
+                        # Cap face: iL, oL, iR then iR, oL, oR  (normal DOWN)
+                        indices.append([cb2+0, cb2+1, cb2+2])
+                        indices.append([cb2+1, cb2+3, cb2+2])
 
                 # --------------------------------------------------------------
                 # BOTTOM BRIM FILLER
-                # Simple box from y=0 down to y=-brim_height, r=Rb to r=Rb+thickness.
-                # Only side walls + a bottom cap at y=-brim_height.
-                # NO top cap at y=0 - the brim ring already covers that plane.
+                # Simple box from y=0 down to y=-brim_height.
+                #
+                # FIX: Added top cap at y=0 facing DOWN to close the hole in the
+                # bottom brim where each pillar intersects it. The brim ring
+                # geometry covers the full annulus at y=0 facing DOWN, but it is
+                # built without knowledge of the pillar angular slots, so those
+                # slots remain open without this cap.
                 # --------------------------------------------------------------
                 if has_bot_brim:
                     bb_r_in  = Rb
@@ -504,10 +537,20 @@ class LithophaneBuilder:
                     row_bot = _bb_row(bb_r_in, bb_r_out, bb_y_bot)
                     _bb_walls(row_top, row_bot)
 
-                    # Bottom cap at y=-brim_height (normal DOWN) - safe, no brim face there
+                    # Bottom cap at y=-brim_height (normal DOWN)
                     indices.append([row_bot+0, row_bot+1, row_bot+2])
                     indices.append([row_bot+1, row_bot+3, row_bot+2])
-                    # NO top cap at y=0 - brim ring covers that
+
+                    # TOP CAP at y=0 (normal DOWN) — closes the hole in the
+                    # bottom brim where the pillar angular slot was open.
+                    ct_bb = len(vertices)
+                    for ci in range(4):
+                        vertices.append(list(vertices[row_top + ci]))
+                        colors.append([0.55, 0.55, 0.55])
+                        normals.append([0.0, -1.0, 0.0])
+                    # Normal DOWN: wind clockwise when viewed from below
+                    indices.append([ct_bb+0, ct_bb+2, ct_bb+1])
+                    indices.append([ct_bb+1, ct_bb+2, ct_bb+3])
 
         # ---- lamp socket + spokes -----------------------------------------------
         y_bed = -float(p.bottom_brim_height) if p.bottom_brim_height > 0 else 0.0
