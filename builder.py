@@ -147,7 +147,7 @@ class LithophaneBuilder:
         mid_gray = (0.6, 0.6, 0.6)
 
         # ------------------------------------------------------------------
-        # Top brim  (fully self-contained ring, no pillar involvement)
+        # Top brim
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
@@ -218,7 +218,7 @@ class LithophaneBuilder:
             _stitch(inner_top_idx, outer_top_idx, outward=False)
 
         # ------------------------------------------------------------------
-        # Bottom brim  (fully self-contained ring, no pillar involvement)
+        # Bottom brim
         # ------------------------------------------------------------------
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
             r_in  = Rb
@@ -257,11 +257,21 @@ class LithophaneBuilder:
             stitch_rings(indices, inner_y0_idx, outer_y0_idx, outward=False)
 
         # ---- frames / pillars ---------------------------------------------------
-        # Pillars run ONLY within the shade body: y=0 (bottom) to y=H (top).
-        # The brims are independent solid geometry above/below, so pillars
-        # never poke through them and can never create holes.
+        # Pillars extend:
+        #   - from y_bot (bottom of bottom brim, or 0) up to y_top (top of top brim, or H)
+        #   - outer radius at the top is clamped to r_out of the top brim so the
+        #     pillar face meets the brim outer wall flush with no gap.
+        #   - outer radius at the bottom is clamped to r_out of the bottom brim.
+        # Inner faces still follow the lithophane surface radii.
         if p.frame_width > 0 and p.frame_thickness > 0:
             steps = nrows
+
+            # Brim outer radii for clamping pillar outer face at brim levels
+            top_brim_r_out = Rt + float(p.top_brim_thickness) if p.top_brim_height > 0 else None
+            bot_brim_r_out = Rb + float(p.bottom_brim_thickness) if p.bottom_brim_height > 0 else None
+            y_pillar_top = H + float(p.top_brim_height)   if p.top_brim_height   > 0 else H
+            y_pillar_bot = -float(p.bottom_brim_height)    if p.bottom_brim_height > 0 else 0.0
+
             for k in range(num_panels):
                 left_idx  = k % num_panels
                 right_idx = (k + 1) % num_panels
@@ -278,16 +288,14 @@ class LithophaneBuilder:
                 theta_left     = theta_boundary - half_dw
                 theta_right    = theta_boundary + half_dw
 
-                # Pillars strictly within shade body only — never into brims
-                y_pillar_bot = 0.0
-                y_pillar_top = H
                 ys_clamped = np.linspace(y_pillar_bot, y_pillar_top, steps + 1, dtype=np.float64)
 
                 pillar_base = len(vertices)
                 pillar_radii_by_level = []
 
                 for y_val in ys_clamped:
-                    v  = 0.0 if H <= 0 else (H - y_val) / H
+                    # interpolate shade radius at this height
+                    v  = 0.0 if H <= 0 else np.clip((H - y_val) / H, 0.0, 1.0)
                     Rv = (1.0 - v) * Rt + v * Rb
                     baseline_outer = Rv + t_min
 
@@ -324,6 +332,15 @@ class LithophaneBuilder:
                         r_in_left  + 1e-3,
                         r_in_right + 1e-3,
                     )
+
+                    # In the top brim zone: clamp outer radius to brim r_out
+                    # so the pillar outer face is flush with the brim outer wall.
+                    if top_brim_r_out is not None and y_val > H:
+                        r_out_common = max(r_out_common, top_brim_r_out)
+                    # In the bottom brim zone: same
+                    if bot_brim_r_out is not None and y_val < 0.0:
+                        r_out_common = max(r_out_common, bot_brim_r_out)
+
                     pillar_radii_by_level.append((r_in_left, r_in_right, r_out_common))
 
                     for idx, (r, theta) in enumerate([(r_in_left, theta_left), (r_in_right, theta_right),
@@ -359,7 +376,7 @@ class LithophaneBuilder:
                     indices.append([b0+0, b0+2, b1+0]); indices.append([b1+0, b0+2, b1+2])
                     indices.append([b0+1, b1+1, b0+3]); indices.append([b1+1, b1+3, b0+3])
 
-                # bottom cap — normal DOWN (y=0, seen from below)
+                # bottom cap - normal DOWN
                 sb = pillar_base
                 cap_bot = len(vertices)
                 for ci in range(4):
@@ -369,7 +386,7 @@ class LithophaneBuilder:
                 indices.append([cap_bot+0, cap_bot+1, cap_bot+2])
                 indices.append([cap_bot+1, cap_bot+3, cap_bot+2])
 
-                # top cap — normal UP (y=H, seen from above)
+                # top cap - normal UP
                 et = pillar_base + (n_steps - 1) * 4
                 cap_top = len(vertices)
                 for ci in range(4):
