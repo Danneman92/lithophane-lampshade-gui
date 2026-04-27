@@ -147,7 +147,7 @@ class LithophaneBuilder:
         mid_gray = (0.6, 0.6, 0.6)
 
         # ------------------------------------------------------------------
-        # Top brim  (fully self-contained solid ring)
+        # Top brim
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
@@ -218,7 +218,7 @@ class LithophaneBuilder:
             _stitch(inner_top_idx, outer_top_idx, outward=False)
 
         # ------------------------------------------------------------------
-        # Bottom brim  (fully self-contained solid ring)
+        # Bottom brim
         # ------------------------------------------------------------------
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
             r_in  = Rb
@@ -257,13 +257,35 @@ class LithophaneBuilder:
             stitch_rings(indices, inner_y0_idx, outer_y0_idx, outward=False)
 
         # ---- frames / pillars ---------------------------------------------------
-        # Pillars run y=0..H (shade body only) so they never intersect brim faces.
-        # Separate fully-enclosed filler blocks bridge each pillar into the brims.
         if p.frame_width > 0 and p.frame_thickness > 0:
             steps = nrows
 
             has_top_brim = p.top_brim_height > 0 and p.top_brim_thickness > 0
             has_bot_brim = p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0
+
+            # Pre-compute fillet arc profile once (shared by all pillars)
+            # Each arc level: (r, y)
+            fillet_r = max(float(p.top_brim_fillet), 0.0) if has_top_brim else 0.0
+            fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
+            tb_r_out_full = Rt + float(p.top_brim_thickness) if has_top_brim else Rt
+            tb_y0 = H
+            tb_y1 = H + float(p.top_brim_height) if has_top_brim else H
+
+            # Arc levels from bottom of fillet up to top of brim
+            # level 0: (r_out - fillet_r, y0)  <- flat bottom of fillet
+            # levels 1..fillet_n: arc steps
+            # final level: (r_out, y0+fillet_r) then vertical to y1
+            if fillet_r > 0 and has_top_brim:
+                arc_levels = []  # list of (r, y)
+                arc_levels.append((tb_r_out_full - fillet_r, tb_y0))
+                for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
+                    r_arc = (tb_r_out_full - fillet_r) + fillet_r * np.sin(t)
+                    y_arc = (tb_y0 + fillet_r) - fillet_r * np.cos(t)
+                    arc_levels.append((r_arc, y_arc))
+                # after fillet top, vertical wall to y1
+                arc_levels.append((tb_r_out_full, tb_y1))
+            else:
+                arc_levels = []
 
             for k in range(num_panels):
                 left_idx  = k % num_panels
@@ -360,7 +382,7 @@ class LithophaneBuilder:
                     indices.append([b0+0, b0+2, b1+0]); indices.append([b1+0, b0+2, b1+2])
                     indices.append([b0+1, b1+1, b0+3]); indices.append([b1+1, b1+3, b0+3])
 
-                # bottom cap of main pillar - normal DOWN
+                # bottom cap of main pillar
                 sb = pillar_base
                 cap_bot = len(vertices)
                 for ci in range(4):
@@ -370,7 +392,7 @@ class LithophaneBuilder:
                 indices.append([cap_bot+0, cap_bot+1, cap_bot+2])
                 indices.append([cap_bot+1, cap_bot+3, cap_bot+2])
 
-                # top cap of main pillar - normal UP
+                # top cap of main pillar
                 et = pillar_base + (n_steps - 1) * 4
                 cap_top = len(vertices)
                 for ci in range(4):
@@ -381,58 +403,66 @@ class LithophaneBuilder:
                 indices.append([cap_top+1, cap_top+2, cap_top+3])
 
                 # ------------------------------------------------------------------
-                # Top brim filler block: a standalone closed box sitting on top of
-                # the brim, same angular width as the pillar, spanning the full
-                # brim thickness (r_in=Rt to r_out=Rt+brim_thickness), from y=H
-                # to y=H+brim_height.  It never touches the brim ring geometry.
+                # Top brim filler: a closed solid whose outer profile follows
+                # the fillet arc exactly, so no step/overhang appears.
+                #
+                # The solid is built as a stack of horizontal slabs. Each slab
+                # has 4 corners: inner-left, inner-right, outer-left, outer-right.
+                # The inner wall stays at r=Rt throughout.
+                # The outer wall radius at each level comes from arc_levels.
                 # ------------------------------------------------------------------
-                if has_top_brim:
-                    tb_r_in  = Rt
-                    tb_r_out = Rt + float(p.top_brim_thickness)
-                    tb_y0    = H
-                    tb_y1    = H + float(p.top_brim_height)
+                if has_top_brim and arc_levels:
+                    tb_r_in = Rt
 
-                    # 8 corners of the box:
-                    # 0: inner-left  bottom  1: inner-right bottom
-                    # 2: outer-left  bottom  3: outer-right bottom
-                    # 4: inner-left  top     5: inner-right top
-                    # 6: outer-left  top     7: outer-right top
-                    tb_corners = [
-                        [tb_r_in  * np.cos(theta_left),  tb_y0, tb_r_in  * np.sin(theta_left)],
-                        [tb_r_in  * np.cos(theta_right), tb_y0, tb_r_in  * np.sin(theta_right)],
-                        [tb_r_out * np.cos(theta_left),  tb_y0, tb_r_out * np.sin(theta_left)],
-                        [tb_r_out * np.cos(theta_right), tb_y0, tb_r_out * np.sin(theta_right)],
-                        [tb_r_in  * np.cos(theta_left),  tb_y1, tb_r_in  * np.sin(theta_left)],
-                        [tb_r_in  * np.cos(theta_right), tb_y1, tb_r_in  * np.sin(theta_right)],
-                        [tb_r_out * np.cos(theta_left),  tb_y1, tb_r_out * np.sin(theta_left)],
-                        [tb_r_out * np.cos(theta_right), tb_y1, tb_r_out * np.sin(theta_right)],
-                    ]
-                    tb_base = len(vertices)
-                    for cx, cy, cz in tb_corners:
-                        vertices.append([cx, cy, cz])
-                        colors.append([0.55, 0.55, 0.55])
-                        normals.append([0.0, 1.0, 0.0])  # placeholder, all faces use dedicated verts below
+                    def _add_slab_verts(r_outer, y_val, nrm_up):
+                        """Add 4 verts (inner-L, inner-R, outer-L, outer-R) for one slab level."""
+                        base_i = len(vertices)
+                        for r, theta in [(tb_r_in, theta_left), (tb_r_in, theta_right),
+                                         (r_outer, theta_left), (r_outer, theta_right)]:
+                            vertices.append([r * np.cos(theta), y_val, r * np.sin(theta)])
+                            colors.append([0.55, 0.55, 0.55])
+                            normals.append([0.0, 1.0 if nrm_up else -1.0, 0.0])
+                        return base_i  # first of the 4 verts
 
-                    def _tb_face(a, b, c, d):
-                        """CCW quad (two tris) from corner indices, normal outward by winding."""
-                        indices.append([tb_base+a, tb_base+b, tb_base+c])
-                        indices.append([tb_base+b, tb_base+d, tb_base+c])
+                    def _slab_faces(b0, b1):
+                        """Stitch two levels (each 4-vert row) into side quads."""
+                        # front inner wall (normal inward)
+                        indices.append([b0+1, b0+0, b1+1]); indices.append([b0+0, b1+0, b1+1])
+                        # back outer wall (normal outward)
+                        indices.append([b0+2, b0+3, b1+2]); indices.append([b0+3, b1+3, b1+2])
+                        # left side
+                        indices.append([b0+0, b0+2, b1+0]); indices.append([b0+2, b1+2, b1+0])
+                        # right side
+                        indices.append([b0+3, b0+1, b1+3]); indices.append([b0+1, b1+1, b1+3])
 
-                    # bottom face (normal DOWN): 0,1,2,3
-                    _tb_face(0, 2, 1, 3)   # swap to flip normal down
-                    # top face (normal UP): 4,5,6,7
-                    _tb_face(4, 5, 6, 7)
-                    # inner face (normal inward): 0,1,4,5
-                    _tb_face(1, 0, 5, 4)
-                    # outer face (normal outward): 2,3,6,7
-                    _tb_face(2, 6, 3, 7)
-                    # left face: 0,2,4,6
-                    _tb_face(0, 4, 2, 6)
-                    # right face: 1,3,5,7
-                    _tb_face(3, 1, 7, 5)
+                    # Bottom cap at y=H (normal DOWN)
+                    r0, y_start = arc_levels[0]
+                    bc = _add_slab_verts(r0, tb_y0, nrm_up=False)
+                    # bottom cap: inner-L=bc+0, inner-R=bc+1, outer-L=bc+2, outer-R=bc+3
+                    indices.append([bc+0, bc+2, bc+1])
+                    indices.append([bc+1, bc+2, bc+3])
+
+                    # Also need a flat inner-bottom row at y=H for slab stacking
+                    # Re-use bc but we need a proper bottom face then stack upward.
+                    # Build level stack: level 0 = y=H with r=arc_levels[0][0]
+                    # then each arc step, then top at y=y1 with r=r_out_full
+                    levels = []
+                    # level 0: flat base at y=H, r = r_out - fillet_r
+                    levels.append(_add_slab_verts(arc_levels[0][0], tb_y0, nrm_up=True))
+                    for r_arc, y_arc in arc_levels[1:]:
+                        levels.append(_add_slab_verts(r_arc, y_arc, nrm_up=True))
+
+                    # side faces between consecutive levels
+                    for i in range(len(levels) - 1):
+                        _slab_faces(levels[i], levels[i+1])
+
+                    # top cap at y=y1 (normal UP)
+                    top_lev = levels[-1]
+                    indices.append([top_lev+0, top_lev+1, top_lev+2])
+                    indices.append([top_lev+1, top_lev+3, top_lev+2])
 
                 # ------------------------------------------------------------------
-                # Bottom brim filler block: same idea, from y=0 down to y=-brim_height
+                # Bottom brim filler block (simple box, no fillet there)
                 # ------------------------------------------------------------------
                 if has_bot_brim:
                     bb_r_in  = Rb
@@ -460,18 +490,12 @@ class LithophaneBuilder:
                         indices.append([bb_base+a, bb_base+b, bb_base+c])
                         indices.append([bb_base+b, bb_base+d, bb_base+c])
 
-                    # bottom face (normal DOWN): 0,1,2,3
-                    _bb_face(0, 1, 2, 3)
-                    # top face (normal UP): 4,5,6,7
-                    _bb_face(4, 6, 5, 7)
-                    # inner face: 0,1,4,5
-                    _bb_face(1, 0, 5, 4)
-                    # outer face: 2,3,6,7
-                    _bb_face(2, 6, 3, 7)
-                    # left face: 0,2,4,6
-                    _bb_face(0, 4, 2, 6)
-                    # right face: 1,3,5,7
-                    _bb_face(3, 1, 7, 5)
+                    _bb_face(0, 1, 2, 3)   # bottom face normal DOWN
+                    _bb_face(4, 6, 5, 7)   # top face normal UP
+                    _bb_face(1, 0, 5, 4)   # inner
+                    _bb_face(2, 6, 3, 7)   # outer
+                    _bb_face(0, 4, 2, 6)   # left
+                    _bb_face(3, 1, 7, 5)   # right
 
         # ---- lamp socket + spokes -----------------------------------------------
         y_bed = -float(p.bottom_brim_height) if p.bottom_brim_height > 0 else 0.0
