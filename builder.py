@@ -110,6 +110,7 @@ class LithophaneBuilder:
                     indices.append([a, b, c])
                     indices.append([b, d, c])
 
+            # top_outer_ring: j goes ncols-1 down to 0  (REVERSED = decreasing angle)
             top_outer_ring.extend([base + 0 * ncols + j for j in range(ncols - 1, -1, -1)])
             bot_outer_ring.extend([base + (nrows - 1) * ncols + j for j in range(ncols - 1, -1, -1)])
 
@@ -136,6 +137,7 @@ class LithophaneBuilder:
                     indices.append([a, c, b])
                     indices.append([b, c, d])
 
+            # top_inner_ring: also reversed
             top_inner_ring.extend([base_in + 0 * ncols + j for j in range(ncols - 1, -1, -1)])
             bot_inner_ring.extend([base_in + (nrows - 1) * ncols + j for j in range(ncols - 1, -1, -1)])
 
@@ -149,17 +151,11 @@ class LithophaneBuilder:
         # ------------------------------------------------------------------
         # Top brim
         #
-        # ALL rings use build_ring_xyz_at_radius so their point count and
-        # angular layout exactly match top_outer_ring / top_inner_ring.
-        # Using a uniform linspace would give a different number of points
-        # (or different angular positions) and leave gaps at pillar seams.
-        #
-        # Fillet: quarter-circle on the bottom-outer corner of the brim.
-        # Prints upside-down so y=H is on the bed — that corner is the
-        # only unsupported overhang.
-        #   centre (r_out-fr, y=H+fr)
-        #   t=0:    r=r_out-fr, y=H      (tangent horizontal, flush with bottom face)
-        #   t=pi/2: r=r_out,    y=H+fr   (tangent vertical,   flush with outer wall)
+        # top_outer_ring is built with j from ncols-1 down to 0, so within
+        # each panel the angle DECREASES (reversed winding).
+        # build_ring_xyz_at_radius iterates j=0..ncols-1 (increasing angle).
+        # We reverse the output of _brim_ring so both lists share the same
+        # decreasing-angle winding and stitch_rings pairs vertices correctly.
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
@@ -175,14 +171,25 @@ class LithophaneBuilder:
             fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
 
             def _brim_ring(r, y):
-                """Build a ring using the same point layout as the shade top rings."""
+                """
+                Build a brim ring with the SAME winding as top_outer_ring:
+                reversed per-panel so angle decreases within each panel segment.
+                """
                 xyz = build_ring_xyz_at_radius(r, y, ncols, num_panels, panels_present)
+                # build_ring_xyz_at_radius gives ncols pts per panel in forward
+                # (increasing angle) order.  Reverse each panel's block so the
+                # winding matches top_outer_ring (decreasing angle per panel).
+                n_present = sum(panels_present)
+                result_xyz = []
+                for pi in range(n_present):
+                    block = xyz[pi * ncols : (pi + 1) * ncols]
+                    result_xyz.extend(reversed(block))
                 s = len(vertices)
-                for x, yv, z in xyz:
+                for x, yv, z in result_xyz:
                     vertices.append([x, yv, z])
                     colors.append(list(mid_gray))
                     normals.append([0.0, 1.0, 0.0])
-                return list(range(s, s + len(xyz)))
+                return list(range(s, s + len(result_xyz)))
 
             def _stitch(inner_idx, outer_idx, outward=True):
                 n = len(inner_idx)
@@ -197,16 +204,16 @@ class LithophaneBuilder:
                         indices.append([a, b, c])
                         indices.append([b, d, c])
 
-            # Bottom face: shade top edge -> r_in ring
+            # bottom face: shade outer top edge -> brim inner ring at y0
             inner_y0_idx = _brim_ring(r_in, y0)
             stitch_rings(indices, top_outer_ring, inner_y0_idx, outward=True)
 
             if fillet_r > 0:
-                # Flat bottom annulus: r_in -> r_out-fillet_r
+                # flat bottom annulus from r_in to fillet start
                 fbase_idx = _brim_ring(r_out - fillet_r, y0)
                 _stitch(inner_y0_idx, fbase_idx, outward=True)
 
-                # Quarter-circle fillet arc
+                # quarter-circle fillet arc
                 prev_idx = fbase_idx
                 for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
                     r_arc    = (r_out - fillet_r) + fillet_r * np.sin(t)
@@ -214,23 +221,21 @@ class LithophaneBuilder:
                     curr_idx = _brim_ring(r_arc, y_arc)
                     _stitch(prev_idx, curr_idx, outward=True)
                     prev_idx = curr_idx
-                # prev_idx is now at (r_out, y0+fillet_r)
 
-                # Straight outer wall: y0+fillet_r -> y1
+                # straight outer wall above fillet
                 outer_top_idx = _brim_ring(r_out, y1)
                 _stitch(prev_idx, outer_top_idx, outward=True)
             else:
-                # No fillet
                 outer_y0_idx  = _brim_ring(r_out, y0)
                 _stitch(inner_y0_idx, outer_y0_idx, outward=True)
                 outer_top_idx = _brim_ring(r_out, y1)
                 _stitch(outer_y0_idx, outer_top_idx, outward=True)
 
-            # Inner wall: r_in, y0 -> y1
+            # inner wall
             inner_top_idx = _brim_ring(r_in, y1)
             _stitch(inner_y0_idx, inner_top_idx, outward=False)
 
-            # Top face: r_in -> r_out at y1  (reuse wall-top rings)
+            # top face (reuse wall-cap rings)
             _stitch(inner_top_idx, outer_top_idx, outward=True)
 
         # Bottom brim
