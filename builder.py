@@ -148,12 +148,6 @@ class LithophaneBuilder:
 
         # ------------------------------------------------------------------
         # Top brim
-        #
-        # _stitch(inner, outer, outward=True)  -> normal points UP   (for top faces)
-        # _stitch(inner, outer, outward=False) -> normal points DOWN  (for bottom faces)
-        #
-        # Vertical walls going upward need outward=True so the outer face
-        # winds CCW when seen from outside.
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
@@ -179,13 +173,11 @@ class LithophaneBuilder:
                         normals.append([-np.cos(ang), 0.0, -np.sin(ang)])
                     elif normal_type == 'down':
                         normals.append([0.0, -1.0, 0.0])
-                    else:  # 'up'
+                    else:
                         normals.append([0.0, 1.0, 0.0])
                 return list(range(s, s + n_pts))
 
             def _stitch(inner_idx, outer_idx, outward=True):
-                """outward=True  -> normal faces UP / outward  (CCW from above/outside)
-                   outward=False -> normal faces DOWN / inward (CW from above/outside)"""
                 n = len(inner_idx)
                 for ii in range(n):
                     jj = (ii + 1) % n
@@ -198,21 +190,16 @@ class LithophaneBuilder:
                         indices.append([a, b, c])
                         indices.append([b, d, c])
 
-            # seam: connect panel outer shell top edge to brim inner ring at y0
             inner_y0_idx = _brim_ring(r_in, y0, normal_type='up')
             stitch_rings(indices, inner_y0_idx, top_outer_ring, outward=True)
 
-            # top face rings — built with _brim_ring so angular layout matches
-            # all other brim rings exactly (same linspace, same n_pts)
             inner_top_idx = _brim_ring(r_in,  y1, normal_type='up')
             outer_top_idx = _brim_ring(r_out, y1, normal_type='up')
 
             if fillet_r > 0:
-                # flat bottom annulus: r_in -> fillet start, normal DOWN
                 fbase_idx = _brim_ring(r_out - fillet_r, y0, normal_type='down')
                 _stitch(inner_y0_idx, fbase_idx, outward=True)
 
-                # quarter-circle fillet arc — each strip faces outward
                 prev_idx = fbase_idx
                 for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
                     r_arc    = (r_out - fillet_r) + fillet_r * np.sin(t)
@@ -221,22 +208,13 @@ class LithophaneBuilder:
                     _stitch(prev_idx, curr_idx, outward=False)
                     prev_idx = curr_idx
 
-                # straight outer wall: top of fillet arc up to y1
-                # wall goes upward and outward-facing -> outward=False on the
-                # (prev=lower, outer_top=upper) pair keeps CCW from outside
                 _stitch(prev_idx, outer_top_idx, outward=False)
             else:
-                # no fillet: flat bottom then straight outer wall
                 outer_y0_idx = _brim_ring(r_out, y0, normal_type='down')
                 _stitch(inner_y0_idx, outer_y0_idx, outward=True)
                 _stitch(outer_y0_idx, outer_top_idx, outward=False)
 
-            # inner wall: r_in cylinder from y0 up to y1
-            # inner face seen from inside -> outward=True keeps correct winding
             _stitch(inner_y0_idx, inner_top_idx, outward=True)
-
-            # top face annulus: inner ring -> outer ring, normal UP
-            # seen from above CCW = outward=False for this helper
             _stitch(inner_top_idx, outer_top_idx, outward=False)
 
         # Bottom brim
@@ -375,8 +353,26 @@ class LithophaneBuilder:
                     indices.append([b0+0, b0+2, b1+0]); indices.append([b1+0, b0+2, b1+2])
                     indices.append([b0+1, b1+1, b0+3]); indices.append([b1+1, b1+3, b0+3])
 
+                # bottom cap
                 sb = pillar_base
                 indices.append([sb+0, sb+1, sb+2]); indices.append([sb+1, sb+3, sb+2])
+
+                # top cap: close the pillar top face (normal UP)
+                # vertex layout per level: 0=inner-left, 1=inner-right, 2=outer-left, 3=outer-right
+                # top level is the last set of 4 vertices
+                et = pillar_base + (n_steps - 1) * 4  # top level base
+                # Add dedicated cap vertices with upward normals so the cap
+                # is a clean manifold face regardless of shared-vertex winding.
+                cap_base = len(vertices)
+                for ci in range(4):
+                    src = et + ci
+                    vertices.append(list(vertices[src]))
+                    colors.append([0.55, 0.55, 0.55])
+                    normals.append([0.0, 1.0, 0.0])
+                # cap_base+0 = inner-left, +1 = inner-right, +2 = outer-left, +3 = outer-right
+                # Two triangles forming a quad, wound CCW from above (normal UP)
+                indices.append([cap_base+0, cap_base+2, cap_base+1])
+                indices.append([cap_base+1, cap_base+2, cap_base+3])
 
         # ---- lamp socket + spokes -----------------------------------------------
         y_bed = -float(p.bottom_brim_height) if p.bottom_brim_height > 0 else 0.0
