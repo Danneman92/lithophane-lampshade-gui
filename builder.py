@@ -147,7 +147,7 @@ class LithophaneBuilder:
         mid_gray = (0.6, 0.6, 0.6)
 
         # ------------------------------------------------------------------
-        # Top brim
+        # Top brim  (fully self-contained solid ring)
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
@@ -218,7 +218,7 @@ class LithophaneBuilder:
             _stitch(inner_top_idx, outer_top_idx, outward=False)
 
         # ------------------------------------------------------------------
-        # Bottom brim
+        # Bottom brim  (fully self-contained solid ring)
         # ------------------------------------------------------------------
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
             r_in  = Rb
@@ -257,20 +257,13 @@ class LithophaneBuilder:
             stitch_rings(indices, inner_y0_idx, outer_y0_idx, outward=False)
 
         # ---- frames / pillars ---------------------------------------------------
-        # Pillars extend:
-        #   - from y_bot (bottom of bottom brim, or 0) up to y_top (top of top brim, or H)
-        #   - outer radius at the top is clamped to r_out of the top brim so the
-        #     pillar face meets the brim outer wall flush with no gap.
-        #   - outer radius at the bottom is clamped to r_out of the bottom brim.
-        # Inner faces still follow the lithophane surface radii.
+        # Pillars run y=0..H (shade body only) so they never intersect brim faces.
+        # Separate fully-enclosed filler blocks bridge each pillar into the brims.
         if p.frame_width > 0 and p.frame_thickness > 0:
             steps = nrows
 
-            # Brim outer radii for clamping pillar outer face at brim levels
-            top_brim_r_out = Rt + float(p.top_brim_thickness) if p.top_brim_height > 0 else None
-            bot_brim_r_out = Rb + float(p.bottom_brim_thickness) if p.bottom_brim_height > 0 else None
-            y_pillar_top = H + float(p.top_brim_height)   if p.top_brim_height   > 0 else H
-            y_pillar_bot = -float(p.bottom_brim_height)    if p.bottom_brim_height > 0 else 0.0
+            has_top_brim = p.top_brim_height > 0 and p.top_brim_thickness > 0
+            has_bot_brim = p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0
 
             for k in range(num_panels):
                 left_idx  = k % num_panels
@@ -288,14 +281,14 @@ class LithophaneBuilder:
                 theta_left     = theta_boundary - half_dw
                 theta_right    = theta_boundary + half_dw
 
-                ys_clamped = np.linspace(y_pillar_bot, y_pillar_top, steps + 1, dtype=np.float64)
+                # --- main pillar: y=0 to y=H ---
+                ys_clamped = np.linspace(0.0, H, steps + 1, dtype=np.float64)
 
                 pillar_base = len(vertices)
                 pillar_radii_by_level = []
 
                 for y_val in ys_clamped:
-                    # interpolate shade radius at this height
-                    v  = 0.0 if H <= 0 else np.clip((H - y_val) / H, 0.0, 1.0)
+                    v  = 0.0 if H <= 0 else (H - y_val) / H
                     Rv = (1.0 - v) * Rt + v * Rb
                     baseline_outer = Rv + t_min
 
@@ -332,15 +325,6 @@ class LithophaneBuilder:
                         r_in_left  + 1e-3,
                         r_in_right + 1e-3,
                     )
-
-                    # In the top brim zone: clamp outer radius to brim r_out
-                    # so the pillar outer face is flush with the brim outer wall.
-                    if top_brim_r_out is not None and y_val > H:
-                        r_out_common = max(r_out_common, top_brim_r_out)
-                    # In the bottom brim zone: same
-                    if bot_brim_r_out is not None and y_val < 0.0:
-                        r_out_common = max(r_out_common, bot_brim_r_out)
-
                     pillar_radii_by_level.append((r_in_left, r_in_right, r_out_common))
 
                     for idx, (r, theta) in enumerate([(r_in_left, theta_left), (r_in_right, theta_right),
@@ -376,7 +360,7 @@ class LithophaneBuilder:
                     indices.append([b0+0, b0+2, b1+0]); indices.append([b1+0, b0+2, b1+2])
                     indices.append([b0+1, b1+1, b0+3]); indices.append([b1+1, b1+3, b0+3])
 
-                # bottom cap - normal DOWN
+                # bottom cap of main pillar - normal DOWN
                 sb = pillar_base
                 cap_bot = len(vertices)
                 for ci in range(4):
@@ -386,7 +370,7 @@ class LithophaneBuilder:
                 indices.append([cap_bot+0, cap_bot+1, cap_bot+2])
                 indices.append([cap_bot+1, cap_bot+3, cap_bot+2])
 
-                # top cap - normal UP
+                # top cap of main pillar - normal UP
                 et = pillar_base + (n_steps - 1) * 4
                 cap_top = len(vertices)
                 for ci in range(4):
@@ -395,6 +379,99 @@ class LithophaneBuilder:
                     normals.append([0.0, 1.0, 0.0])
                 indices.append([cap_top+0, cap_top+2, cap_top+1])
                 indices.append([cap_top+1, cap_top+2, cap_top+3])
+
+                # ------------------------------------------------------------------
+                # Top brim filler block: a standalone closed box sitting on top of
+                # the brim, same angular width as the pillar, spanning the full
+                # brim thickness (r_in=Rt to r_out=Rt+brim_thickness), from y=H
+                # to y=H+brim_height.  It never touches the brim ring geometry.
+                # ------------------------------------------------------------------
+                if has_top_brim:
+                    tb_r_in  = Rt
+                    tb_r_out = Rt + float(p.top_brim_thickness)
+                    tb_y0    = H
+                    tb_y1    = H + float(p.top_brim_height)
+
+                    # 8 corners of the box:
+                    # 0: inner-left  bottom  1: inner-right bottom
+                    # 2: outer-left  bottom  3: outer-right bottom
+                    # 4: inner-left  top     5: inner-right top
+                    # 6: outer-left  top     7: outer-right top
+                    tb_corners = [
+                        [tb_r_in  * np.cos(theta_left),  tb_y0, tb_r_in  * np.sin(theta_left)],
+                        [tb_r_in  * np.cos(theta_right), tb_y0, tb_r_in  * np.sin(theta_right)],
+                        [tb_r_out * np.cos(theta_left),  tb_y0, tb_r_out * np.sin(theta_left)],
+                        [tb_r_out * np.cos(theta_right), tb_y0, tb_r_out * np.sin(theta_right)],
+                        [tb_r_in  * np.cos(theta_left),  tb_y1, tb_r_in  * np.sin(theta_left)],
+                        [tb_r_in  * np.cos(theta_right), tb_y1, tb_r_in  * np.sin(theta_right)],
+                        [tb_r_out * np.cos(theta_left),  tb_y1, tb_r_out * np.sin(theta_left)],
+                        [tb_r_out * np.cos(theta_right), tb_y1, tb_r_out * np.sin(theta_right)],
+                    ]
+                    tb_base = len(vertices)
+                    for cx, cy, cz in tb_corners:
+                        vertices.append([cx, cy, cz])
+                        colors.append([0.55, 0.55, 0.55])
+                        normals.append([0.0, 1.0, 0.0])  # placeholder, all faces use dedicated verts below
+
+                    def _tb_face(a, b, c, d):
+                        """CCW quad (two tris) from corner indices, normal outward by winding."""
+                        indices.append([tb_base+a, tb_base+b, tb_base+c])
+                        indices.append([tb_base+b, tb_base+d, tb_base+c])
+
+                    # bottom face (normal DOWN): 0,1,2,3
+                    _tb_face(0, 2, 1, 3)   # swap to flip normal down
+                    # top face (normal UP): 4,5,6,7
+                    _tb_face(4, 5, 6, 7)
+                    # inner face (normal inward): 0,1,4,5
+                    _tb_face(1, 0, 5, 4)
+                    # outer face (normal outward): 2,3,6,7
+                    _tb_face(2, 6, 3, 7)
+                    # left face: 0,2,4,6
+                    _tb_face(0, 4, 2, 6)
+                    # right face: 1,3,5,7
+                    _tb_face(3, 1, 7, 5)
+
+                # ------------------------------------------------------------------
+                # Bottom brim filler block: same idea, from y=0 down to y=-brim_height
+                # ------------------------------------------------------------------
+                if has_bot_brim:
+                    bb_r_in  = Rb
+                    bb_r_out = Rb + float(p.bottom_brim_thickness)
+                    bb_y1    = 0.0
+                    bb_y0    = -float(p.bottom_brim_height)
+
+                    bb_corners = [
+                        [bb_r_in  * np.cos(theta_left),  bb_y0, bb_r_in  * np.sin(theta_left)],
+                        [bb_r_in  * np.cos(theta_right), bb_y0, bb_r_in  * np.sin(theta_right)],
+                        [bb_r_out * np.cos(theta_left),  bb_y0, bb_r_out * np.sin(theta_left)],
+                        [bb_r_out * np.cos(theta_right), bb_y0, bb_r_out * np.sin(theta_right)],
+                        [bb_r_in  * np.cos(theta_left),  bb_y1, bb_r_in  * np.sin(theta_left)],
+                        [bb_r_in  * np.cos(theta_right), bb_y1, bb_r_in  * np.sin(theta_right)],
+                        [bb_r_out * np.cos(theta_left),  bb_y1, bb_r_out * np.sin(theta_left)],
+                        [bb_r_out * np.cos(theta_right), bb_y1, bb_r_out * np.sin(theta_right)],
+                    ]
+                    bb_base = len(vertices)
+                    for cx, cy, cz in bb_corners:
+                        vertices.append([cx, cy, cz])
+                        colors.append([0.55, 0.55, 0.55])
+                        normals.append([0.0, -1.0, 0.0])
+
+                    def _bb_face(a, b, c, d):
+                        indices.append([bb_base+a, bb_base+b, bb_base+c])
+                        indices.append([bb_base+b, bb_base+d, bb_base+c])
+
+                    # bottom face (normal DOWN): 0,1,2,3
+                    _bb_face(0, 1, 2, 3)
+                    # top face (normal UP): 4,5,6,7
+                    _bb_face(4, 6, 5, 7)
+                    # inner face: 0,1,4,5
+                    _bb_face(1, 0, 5, 4)
+                    # outer face: 2,3,6,7
+                    _bb_face(2, 6, 3, 7)
+                    # left face: 0,2,4,6
+                    _bb_face(0, 4, 2, 6)
+                    # right face: 1,3,5,7
+                    _bb_face(3, 1, 7, 5)
 
         # ---- lamp socket + spokes -----------------------------------------------
         y_bed = -float(p.bottom_brim_height) if p.bottom_brim_height > 0 else 0.0
