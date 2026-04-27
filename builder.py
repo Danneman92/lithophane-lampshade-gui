@@ -144,7 +144,7 @@ class LithophaneBuilder:
         if top_outer_ring and top_inner_ring:
             stitch_rings(indices, top_inner_ring, top_outer_ring, outward=True)
         if bot_outer_ring and bot_inner_ring:
-            stitch_rings(indices, bot_inner_ring, bot_outer_ring, outward=False)
+            stitch_rings(indices, bot_outer_ring, bot_outer_ring, outward=False)
 
         mid_gray = (0.6, 0.6, 0.6)
 
@@ -206,7 +206,7 @@ class LithophaneBuilder:
 
             # bottom face: shade outer top edge -> brim inner ring at y0
             inner_y0_idx = _brim_ring(r_in, y0)
-            stitch_rings(indices, top_outer_ring, inner_y0_idx, outward=True)
+            stitch_rings(indices, inner_y0_idx, top_outer_ring, outward=True)
 
             if fillet_r > 0:
                 # flat bottom annulus from r_in to fillet start
