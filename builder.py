@@ -110,7 +110,7 @@ class LithophaneBuilder:
                     indices.append([a, b, c])
                     indices.append([b, d, c])
 
-            # top_outer_ring: j decreases (ncols-1 -> 0) = decreasing angle per panel
+            # top_outer_ring: j goes ncols-1 down to 0  (REVERSED = decreasing angle)
             top_outer_ring.extend([base + 0 * ncols + j for j in range(ncols - 1, -1, -1)])
             bot_outer_ring.extend([base + (nrows - 1) * ncols + j for j in range(ncols - 1, -1, -1)])
 
@@ -137,116 +137,100 @@ class LithophaneBuilder:
                     indices.append([a, c, b])
                     indices.append([b, c, d])
 
+            # top_inner_ring: also reversed
             top_inner_ring.extend([base_in + 0 * ncols + j for j in range(ncols - 1, -1, -1)])
             bot_inner_ring.extend([base_in + (nrows - 1) * ncols + j for j in range(ncols - 1, -1, -1)])
 
-        # shade top cap (inner to outer)
         if top_outer_ring and top_inner_ring:
             stitch_rings(indices, top_inner_ring, top_outer_ring, outward=True)
         if bot_outer_ring and bot_inner_ring:
-            stitch_rings(indices, bot_inner_ring, bot_outer_ring, outward=False)
+            stitch_rings(indices, bot_outer_ring, bot_outer_ring, outward=False)
 
         mid_gray = (0.6, 0.6, 0.6)
 
         # ------------------------------------------------------------------
         # Top brim
-        #
-        # Strategy: avoid trying to stitch a flat circle to the jagged
-        # top_outer_ring (which has per-vertex varying radii from image data).
-        #
-        # Instead the brim outer wall + fillet + top cap are all built at a
-        # single constant radius:
-        #   r_out = Rt + t_max + top_brim_thickness
-        # which is guaranteed to clear every panel vertex and every pillar.
-        #
-        # The brim bottom face is a flat annulus at y=H connecting
-        # top_outer_ring (inner edge, already at the right y) outward to
-        # a uniform ring at r_out.  We build that uniform ring with the same
-        # per-panel decreasing-angle winding as top_outer_ring so every
-        # stitch_rings call pairs vertices correctly.
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
+            r_in     = Rt
+            r_out    = Rt + p.top_brim_thickness
             y0       = H
             y1       = H + p.top_brim_height
-            # r_out clears the maximum possible panel radius + user brim thickness
-            r_out    = Rt + t_max + float(p.top_brim_thickness)
             fillet_r = float(p.top_brim_fillet)
-            fillet_r = min(fillet_r, float(p.top_brim_thickness) / 2.0,
-                           float(p.top_brim_height) / 2.0)
             fillet_r = max(fillet_r, 0.0)
             fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
+            n_pts = ncols * num_panels
 
-            def _brim_ring(r, y):
-                """
-                Uniform ring matching top_outer_ring winding:
-                for each present panel iterate j from ncols-1 down to 0
-                (angle decreases within each panel block).
-                """
+            def _brim_ring(r, y, normal_type='up'):
                 s = len(vertices)
-                for p_idx, present in enumerate(panels_present):
-                    if not present:
-                        continue
-                    for j in range(ncols - 1, -1, -1):
-                        u_prime = 1.0 - (j / float(ncols - 1))
-                        ang = p_idx * theta_step + u_prime * theta_step
-                        vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
-                        colors.append(list(mid_gray))
+                angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+                for ang in angles:
+                    x = r * np.cos(ang)
+                    z = r * np.sin(ang)
+                    vertices.append([x, y, z])
+                    colors.append(list(mid_gray))
+                    if normal_type == 'outward':
+                        normals.append([np.cos(ang), 0.0, np.sin(ang)])
+                    elif normal_type == 'inward':
+                        normals.append([-np.cos(ang), 0.0, -np.sin(ang)])
+                    elif normal_type == 'down':
+                        normals.append([0.0, -1.0, 0.0])
+                    else:
                         normals.append([0.0, 1.0, 0.0])
-                return list(range(s, len(vertices)))
+                return list(range(s, s + n_pts))
 
-            def _stitch(ring_a, ring_b, flip=False):
-                n = len(ring_a)
-                for i in range(n):
-                    j = (i + 1) % n
-                    a, b = ring_a[i], ring_a[j]
-                    c, d = ring_b[i], ring_b[j]
-                    if not flip:
+            def _stitch(inner_idx, outer_idx, outward=True):
+                n = len(inner_idx)
+                for ii in range(n):
+                    jj = (ii + 1) % n
+                    a, b = inner_idx[ii], inner_idx[jj]
+                    c, d = outer_idx[ii], outer_idx[jj]
+                    if outward:
                         indices.append([a, c, b])
                         indices.append([b, c, d])
                     else:
                         indices.append([a, b, c])
                         indices.append([b, d, c])
 
-            # -- bottom face: top_outer_ring (inner, jagged) -> flat ring at r_out --
-            # top_outer_ring winding: decreasing angle per panel.
-            # _brim_ring also decreasing angle per panel.
-            # stitch_rings(inner, outer, outward=False) gives upward-facing flat face.
+            # seam: connect panel outer shell top edge to brim inner ring
+            inner_y0_idx = _brim_ring(r_in, y0, normal_type='up')
+            stitch_rings(indices, inner_y0_idx, top_outer_ring, outward=True)
+
+            # build inner and outer top rings HERE, before the if/else,
+            # using _brim_ring so they share the same uniform angular layout
+            # as every other brim ring (fillet arcs, fbase, etc.)
+            inner_top_idx = _brim_ring(r_in,  y1, normal_type='up')
+            outer_top_idx = _brim_ring(r_out, y1, normal_type='up')
+
             if fillet_r > 0:
-                fbase = _brim_ring(r_out - fillet_r, y0)
-                # bottom annulus: panel edge -> fillet base
-                stitch_rings(indices, top_outer_ring, fbase, outward=False)
+                # flat bottom annulus: r_in -> fillet start
+                fbase_idx = _brim_ring(r_out - fillet_r, y0, normal_type='down')
+                _stitch(inner_y0_idx, fbase_idx, outward=True)
 
-                # quarter-circle fillet: outward and upward
-                prev = fbase
+                # quarter-circle fillet arc
+                prev_idx = fbase_idx
                 for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
-                    r_arc = (r_out - fillet_r) + fillet_r * np.sin(t)
-                    y_arc = y0 + fillet_r - fillet_r * np.cos(t)
-                    curr  = _brim_ring(r_arc, y_arc)
-                    _stitch(prev, curr)
-                    prev = curr
+                    r_arc    = (r_out - fillet_r) + fillet_r * np.sin(t)
+                    y_arc    = (y0   + fillet_r) - fillet_r * np.cos(t)
+                    curr_idx = _brim_ring(r_arc, y_arc, normal_type='outward')
+                    _stitch(prev_idx, curr_idx, outward=False)
+                    prev_idx = curr_idx
 
-                # straight outer wall: top of fillet -> y1
-                outer_y1 = _brim_ring(r_out, y1)
-                _stitch(prev, outer_y1)
+                # outer wall: top of fillet -> outer_top_idx
+                _stitch(prev_idx, outer_top_idx, outward=False)
             else:
-                outer_y0 = _brim_ring(r_out, y0)
-                stitch_rings(indices, top_outer_ring, outer_y0, outward=False)
-                outer_y1 = _brim_ring(r_out, y1)
-                _stitch(outer_y0, outer_y1)
+                # no fillet: straight outer wall y0 -> y1
+                outer_y0_idx = _brim_ring(r_out, y0, normal_type='down')
+                _stitch(inner_y0_idx, outer_y0_idx, outward=True)
+                _stitch(outer_y0_idx, outer_top_idx, outward=False)
 
-            # inner wall: straight up at Rt from y0 to y1
-            # top_inner_ring is at Rt; build inner_y1 at same radius
-            inner_y1 = _brim_ring(Rt, y1)
-            # stitch_rings(inner_ring_at_y0, inner_ring_at_y1) for the inner wall
-            # top_inner_ring winding = same decreasing-angle-per-panel as _brim_ring
-            stitch_rings(indices, top_inner_ring, inner_y1, outward=False)
+            # inner wall: r_in from y0 up to y1
+            _stitch(inner_y0_idx, inner_top_idx, outward=False)
 
-            # top face: inner_y1 -> outer_y1
-            _stitch(inner_y1, outer_y1)
+            # top face annulus
+            _stitch(inner_top_idx, outer_top_idx, outward=True)
 
-        # ------------------------------------------------------------------
         # Bottom brim
-        # ------------------------------------------------------------------
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
             r_in  = Rb
             r_out = Rb + p.bottom_brim_thickness
@@ -349,18 +333,29 @@ class LithophaneBuilder:
                     )
                     pillar_radii_by_level.append((r_in_left, r_in_right, r_out_common))
 
-                    for idx, (r, theta) in enumerate([
-                        (r_in_left,    theta_left),
-                        (r_in_right,   theta_right),
-                        (r_out_common, theta_left),
-                        (r_out_common, theta_right),
-                    ]):
-                        vertices.append([r * np.cos(theta), y_val, r * np.sin(theta)])
+                    for idx, (r, theta) in enumerate([(r_in_left, theta_left), (r_in_right, theta_right),
+                                         (r_out_common, theta_left), (r_out_common, theta_right)]):
+                        vx = r * np.cos(theta)
+                        vz = r * np.sin(theta)
+                        vertices.append([vx, y_val, vz])
                         colors.append([0.55, 0.55, 0.55])
                         if idx < 2:
                             normals.append([-np.cos(theta), 0, -np.sin(theta)])
                         else:
                             normals.append([np.cos(theta), 0, np.sin(theta)])
+
+                n_levels = len(ys_clamped)
+                for level_idx in range(n_levels - 1):
+                    dr_out = pillar_radii_by_level[level_idx + 1][2] - pillar_radii_by_level[level_idx][2]
+                    dy = ys_clamped[level_idx + 1] - ys_clamped[level_idx]
+                    slope = dr_out / (dy + 1e-6)
+                    for outer_idx in [2, 3]:
+                        vert_idx = pillar_base + level_idx * 4 + outer_idx
+                        vpos = vertices[vert_idx]
+                        theta_v = np.arctan2(vpos[2], vpos[0])
+                        adjusted_n = np.array([np.cos(theta_v), 0.2 * slope, np.sin(theta_v)])
+                        adjusted_n = adjusted_n / (np.linalg.norm(adjusted_n) + 1e-6)
+                        normals[vert_idx] = adjusted_n.tolist()
 
                 n_steps = len(ys_clamped)
                 for s in range(n_steps - 1):
