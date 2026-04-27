@@ -147,7 +147,7 @@ class LithophaneBuilder:
         mid_gray = (0.6, 0.6, 0.6)
 
         # ------------------------------------------------------------------
-        # Top brim
+        # Top brim  (fully self-contained ring, no pillar involvement)
         # ------------------------------------------------------------------
         if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
             r_in     = Rt
@@ -217,7 +217,9 @@ class LithophaneBuilder:
             _stitch(inner_y0_idx, inner_top_idx, outward=True)
             _stitch(inner_top_idx, outer_top_idx, outward=False)
 
-        # Bottom brim
+        # ------------------------------------------------------------------
+        # Bottom brim  (fully self-contained ring, no pillar involvement)
+        # ------------------------------------------------------------------
         if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
             r_in  = Rb
             r_out = Rb + p.bottom_brim_thickness
@@ -255,6 +257,9 @@ class LithophaneBuilder:
             stitch_rings(indices, inner_y0_idx, outer_y0_idx, outward=False)
 
         # ---- frames / pillars ---------------------------------------------------
+        # Pillars run ONLY within the shade body: y=0 (bottom) to y=H (top).
+        # The brims are independent solid geometry above/below, so pillars
+        # never poke through them and can never create holes.
         if p.frame_width > 0 and p.frame_thickness > 0:
             steps = nrows
             for k in range(num_panels):
@@ -273,9 +278,10 @@ class LithophaneBuilder:
                 theta_left     = theta_boundary - half_dw
                 theta_right    = theta_boundary + half_dw
 
-                y_bot = -p.bottom_brim_height if p.bottom_brim_height > 0 else 0.0
-                y_top = H + p.top_brim_height  if p.top_brim_height  > 0 else H
-                ys_clamped = np.linspace(y_bot, y_top - 1e-3, steps + 1, dtype=np.float64)
+                # Pillars strictly within shade body only — never into brims
+                y_pillar_bot = 0.0
+                y_pillar_top = H
+                ys_clamped = np.linspace(y_pillar_bot, y_pillar_top, steps + 1, dtype=np.float64)
 
                 pillar_base = len(vertices)
                 pillar_radii_by_level = []
@@ -353,26 +359,25 @@ class LithophaneBuilder:
                     indices.append([b0+0, b0+2, b1+0]); indices.append([b1+0, b0+2, b1+2])
                     indices.append([b0+1, b1+1, b0+3]); indices.append([b1+1, b1+3, b0+3])
 
-                # bottom cap
+                # bottom cap — normal DOWN (y=0, seen from below)
                 sb = pillar_base
-                indices.append([sb+0, sb+1, sb+2]); indices.append([sb+1, sb+3, sb+2])
-
-                # top cap: close the pillar top face (normal UP)
-                # vertex layout per level: 0=inner-left, 1=inner-right, 2=outer-left, 3=outer-right
-                # top level is the last set of 4 vertices
-                et = pillar_base + (n_steps - 1) * 4  # top level base
-                # Add dedicated cap vertices with upward normals so the cap
-                # is a clean manifold face regardless of shared-vertex winding.
-                cap_base = len(vertices)
+                cap_bot = len(vertices)
                 for ci in range(4):
-                    src = et + ci
-                    vertices.append(list(vertices[src]))
+                    vertices.append(list(vertices[sb + ci]))
+                    colors.append([0.55, 0.55, 0.55])
+                    normals.append([0.0, -1.0, 0.0])
+                indices.append([cap_bot+0, cap_bot+1, cap_bot+2])
+                indices.append([cap_bot+1, cap_bot+3, cap_bot+2])
+
+                # top cap — normal UP (y=H, seen from above)
+                et = pillar_base + (n_steps - 1) * 4
+                cap_top = len(vertices)
+                for ci in range(4):
+                    vertices.append(list(vertices[et + ci]))
                     colors.append([0.55, 0.55, 0.55])
                     normals.append([0.0, 1.0, 0.0])
-                # cap_base+0 = inner-left, +1 = inner-right, +2 = outer-left, +3 = outer-right
-                # Two triangles forming a quad, wound CCW from above (normal UP)
-                indices.append([cap_base+0, cap_base+2, cap_base+1])
-                indices.append([cap_base+1, cap_base+2, cap_base+3])
+                indices.append([cap_top+0, cap_top+2, cap_top+1])
+                indices.append([cap_top+1, cap_top+2, cap_top+3])
 
         # ---- lamp socket + spokes -----------------------------------------------
         y_bed = -float(p.bottom_brim_height) if p.bottom_brim_height > 0 else 0.0
