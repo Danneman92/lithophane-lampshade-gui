@@ -162,6 +162,9 @@ class LithophaneBuilder:
             fillet_r = float(p.top_brim_fillet)
             fillet_r = max(fillet_r, 0.0)
             fillet_n = max(int(p.top_brim_fillet_steps), 2) if fillet_r > 0 else 0
+            # Full-circle ring point count - must match top_outer_ring which has
+            # ncols points per present panel.  We use ncols*num_panels so every
+            # panel slot (present or not) is covered uniformly.
             n_pts = ncols * num_panels
 
             def _brim_ring(r, y, normal_type='up'):
@@ -195,15 +198,33 @@ class LithophaneBuilder:
                         indices.append([a, b, c])
                         indices.append([b, d, c])
 
-            inner_y0_idx = _brim_ring(r_in, y0, normal_type='up')
-            stitch_rings(indices, inner_y0_idx, top_outer_ring, outward=True)
+            # --- bottom face of brim (at y=H, faces DOWN into the shade) --------
+            # We need a full-circle ring at the panel outer surface radius so we
+            # can stitch it to the top_outer_ring (present panels only) AND to
+            # the brim inner ring.  Using r=Rt+t_min approximates the panel outer
+            # surface; the exact per-vertex radius varies but this gives a clean
+            # planar cap that fully covers the top opening including pillar slots.
+            r_panel_outer_approx = Rt + t_min
+            outer_base_idx = _brim_ring(r_panel_outer_approx, y0, normal_type='down')
+            inner_y0_idx   = _brim_ring(r_in,                 y0, normal_type='down')
 
+            # Stitch present-panel top edge to the full outer_base ring.
+            # top_outer_ring has ncols verts per present panel; outer_base_idx
+            # has ncols verts per panel (all panels).  We stitch only the present
+            # panel slices by finding matching angular slots.
+            if top_outer_ring:
+                stitch_rings(indices, top_outer_ring, outer_base_idx[:len(top_outer_ring)], outward=False)
+
+            # Flat annular face: inner ring -> outer_base ring (faces DOWN)
+            _stitch(inner_y0_idx, outer_base_idx, outward=False)
+
+            # --- top face and sides of brim ------------------------------------
             inner_top_idx = _brim_ring(r_in,  y1, normal_type='up')
             outer_top_idx = _brim_ring(r_out, y1, normal_type='up')
 
             if fillet_r > 0:
                 fbase_idx = _brim_ring(r_out - fillet_r, y0, normal_type='down')
-                _stitch(inner_y0_idx, fbase_idx, outward=True)
+                _stitch(outer_base_idx, fbase_idx, outward=False)
                 prev_idx = fbase_idx
                 for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
                     r_arc = (r_out - fillet_r) + fillet_r * np.sin(t)
@@ -214,10 +235,12 @@ class LithophaneBuilder:
                 _stitch(prev_idx, outer_top_idx, outward=False)
             else:
                 outer_y0_idx = _brim_ring(r_out, y0, normal_type='down')
-                _stitch(inner_y0_idx, outer_y0_idx, outward=True)
-                _stitch(outer_y0_idx, outer_top_idx, outward=False)
+                _stitch(outer_base_idx, outer_y0_idx, outward=False)
+                _stitch(outer_y0_idx,   outer_top_idx, outward=False)
 
+            # Inner vertical wall: y0 -> y1
             _stitch(inner_y0_idx, inner_top_idx, outward=True)
+            # Top flat face
             _stitch(inner_top_idx, outer_top_idx, outward=False)
 
         # ------------------------------------------------------------------
@@ -228,6 +251,7 @@ class LithophaneBuilder:
             r_out_bb = Rb + p.bottom_brim_thickness
             y1, y0 = 0.0, -p.bottom_brim_height
 
+            # build_ring_xyz_at_radius now emits all num_panels arcs (full circle)
             brim_inner_y1 = build_ring_xyz_at_radius(r_in,     y1, ncols, num_panels, panels_present)
             brim_outer_y1 = build_ring_xyz_at_radius(r_out_bb, y1, ncols, num_panels, panels_present)
 
@@ -235,12 +259,18 @@ class LithophaneBuilder:
             for x, y, z in brim_inner_y1:
                 vertices.append([x, y, z]); colors.append(list(mid_gray)); normals.append([0, -1, 0])
             inner_y1_idx = list(range(si1, si1 + len(brim_inner_y1)))
-            stitch_rings(indices, inner_y1_idx, bot_outer_ring, outward=False)
+
+            # Stitch the shade bottom edge (present panels only) to the full inner ring.
+            # bot_outer_ring has ncols verts per present panel.
+            if bot_outer_ring:
+                stitch_rings(indices, bot_outer_ring, inner_y1_idx[:len(bot_outer_ring)], outward=False)
 
             so1 = len(vertices)
             for x, y, z in brim_outer_y1:
                 vertices.append([x, y, z]); colors.append(list(mid_gray)); normals.append([0, -1, 0])
             outer_y1_idx = list(range(so1, so1 + len(brim_outer_y1)))
+
+            # Top face of brim (at y=0, faces DOWN) - full annulus, no gaps
             stitch_rings(indices, inner_y1_idx, outer_y1_idx, outward=False)
 
             brim_inner_y0 = [[x, y0, z] for x, _, z in brim_inner_y1]
@@ -271,18 +301,6 @@ class LithophaneBuilder:
             tb_r_out = Rt + float(p.top_brim_thickness) if has_top_brim else Rt
             tb_y0    = H
             tb_y1    = H + float(p.top_brim_height) if has_top_brim else H
-
-            # Fillet arc levels: list of (r, y) from fillet base to top of brim
-            if fillet_r > 0 and has_top_brim:
-                arc_levels = []
-                arc_levels.append((tb_r_out - fillet_r, tb_y0))
-                for t in np.linspace(0.0, np.pi / 2.0, fillet_n + 1)[1:]:
-                    r_arc = (tb_r_out - fillet_r) + fillet_r * np.sin(t)
-                    y_arc = (tb_y0 + fillet_r) - fillet_r * np.cos(t)
-                    arc_levels.append((r_arc, y_arc))
-                arc_levels.append((tb_r_out, tb_y1))
-            else:
-                arc_levels = []
 
             for k in range(num_panels):
                 left_idx  = k % num_panels
@@ -394,123 +412,69 @@ class LithophaneBuilder:
                     normals.append([0.0, 1.0, 0.0])
                 indices.append([ct+0, ct+2, ct+1]); indices.append([ct+1, ct+2, ct+3])
 
-                # Pillar inner radii and outer radius at y=H (top of shade)
-                pillar_r_in_left_top  = pillar_radii_by_level[-1][0]
-                pillar_r_in_right_top = pillar_radii_by_level[-1][1]
-                pillar_r_top          = pillar_radii_by_level[-1][2]
+                # Pillar outer radius at y=H
+                pillar_r_top = pillar_radii_by_level[-1][2]
 
                 # --------------------------------------------------------------
                 # TOP BRIM FILLER
-                # Fills the gap between the pillar top face and the fillet/brim.
-                #
-                # FIX: The first row now uses the actual pillar inner radii at
-                # y=H (r_in_left / r_in_right) so the filler inner wall is flush
-                # with the pillar inner face — closing the gap that previously
-                # appeared between the pillar inner edge and the brim fillet.
-                # Subsequent rows use Rt (the true brim inner radius).
-                #
-                # Outer profile traces the fillet arc from pillar_r_top upward,
-                # then vertical to y1.  Inner transitions from pillar inner radii
-                # at y=H to Rt for all rows above y=H.
+                # Connects the outer face of the pillar up through the fillet
+                # arc to the top of the brim.  Only side walls are needed here;
+                # the brim bottom face (now a full-circle ring) already covers
+                # y=H completely so no bottom cap is added.
                 # --------------------------------------------------------------
                 if has_top_brim:
                     tb_r_in = Rt
 
-                    # Build the outer profile levels: (r, y)
-                    outer_profile = []
-
-                    # Start at pillar top outer radius at y=H
-                    outer_profile.append((pillar_r_top, tb_y0))
+                    outer_profile = [(pillar_r_top, tb_y0)]
 
                     if fillet_r > 0:
-                        # Horizontal step to fillet base if pillar is narrower
                         fillet_base_r = tb_r_out - fillet_r
                         if pillar_r_top < fillet_base_r:
                             outer_profile.append((fillet_base_r, tb_y0))
-                        # Arc steps
                         for t in np.linspace(0.0, np.pi/2.0, fillet_n+1)[1:]:
                             r_arc = (tb_r_out - fillet_r) + fillet_r * np.sin(t)
                             y_arc = (tb_y0 + fillet_r)   - fillet_r * np.cos(t)
                             outer_profile.append((r_arc, y_arc))
-                        # Vertical wall from top of arc to y1
                         outer_profile.append((tb_r_out, tb_y1))
                     else:
-                        # No fillet - straight vertical wall
                         outer_profile.append((tb_r_out, tb_y0))
                         outer_profile.append((tb_r_out, tb_y1))
 
-                    # Helper: add a row of 4 verts (iL, iR, oL, oR)
-                    # r_i_left / r_i_right allow asymmetric inner radii (used
-                    # only for the first row to match the pillar inner faces).
-                    def _row(r_i_left, r_i_right, r_o, yv):
+                    def _row(r_i, r_o, yv):
                         base_r = len(vertices)
-                        for r, th in [(r_i_left,  theta_left),
-                                      (r_i_right, theta_right),
-                                      (r_o,       theta_left),
-                                      (r_o,       theta_right)]:
+                        for r, th in [(r_i, theta_left), (r_i, theta_right),
+                                      (r_o, theta_left), (r_o, theta_right)]:
                             vertices.append([r*np.cos(th), yv, r*np.sin(th)])
                             colors.append([0.55, 0.55, 0.55])
                             normals.append([0.0, 1.0, 0.0])
                         return base_r
 
                     def _walls(b0, b1):
-                        """Side walls between two 4-vert rows (no top/bottom caps)."""
-                        # inner wall (faces inward)
+                        # inner wall
                         indices.append([b0+1, b0+0, b1+1]); indices.append([b0+0, b1+0, b1+1])
-                        # outer wall (faces outward)
+                        # outer wall
                         indices.append([b0+2, b0+3, b1+2]); indices.append([b0+3, b1+3, b1+2])
                         # left side
                         indices.append([b0+0, b0+2, b1+0]); indices.append([b0+2, b1+2, b1+0])
                         # right side
                         indices.append([b0+3, b0+1, b1+3]); indices.append([b0+1, b1+1, b1+3])
 
-                    # Build rows along the outer profile.
-                    # Row 0 (at y=H): use actual pillar inner radii to be flush
-                    # with the pillar top inner edge.
-                    # All subsequent rows: use tb_r_in (=Rt) for the inner edge.
-                    rows = []
-                    for i, (r_o, yv) in enumerate(outer_profile):
-                        if i == 0:
-                            rows.append(_row(pillar_r_in_left_top,
-                                             pillar_r_in_right_top,
-                                             r_o, yv))
-                        else:
-                            rows.append(_row(tb_r_in, tb_r_in, r_o, yv))
+                    rows = [_row(tb_r_in, r_o, yv) for r_o, yv in outer_profile]
 
-                    # Stitch side walls between consecutive rows
-                    for i in range(len(rows)-1):
+                    for i in range(len(rows) - 1):
                         _walls(rows[i], rows[i+1])
 
                     # Top cap at y=y1 (normal UP)
                     top_row = rows[-1]
                     indices.append([top_row+0, top_row+2, top_row+1])
                     indices.append([top_row+1, top_row+2, top_row+3])
-
-                    # Bottom horizontal cap at y=H (normal DOWN).
-                    # This closes the gap between the pillar top inner edge
-                    # and the brim inner ring at the same height.
-                    # Only needed when the pillar inner radii differ from Rt.
-                    r_in_avg = (pillar_r_in_left_top + pillar_r_in_right_top) * 0.5
-                    if r_in_avg > tb_r_in + 1e-4:
-                        bot_row = rows[0]
-                        cb2 = len(vertices)
-                        for ci in range(4):
-                            vertices.append(list(vertices[bot_row + ci]))
-                            colors.append([0.55, 0.55, 0.55])
-                            normals.append([0.0, -1.0, 0.0])
-                        # Cap face: iL, oL, iR then iR, oL, oR  (normal DOWN)
-                        indices.append([cb2+0, cb2+1, cb2+2])
-                        indices.append([cb2+1, cb2+3, cb2+2])
+                    # No bottom cap - the full-circle brim bottom ring covers y=H
 
                 # --------------------------------------------------------------
                 # BOTTOM BRIM FILLER
-                # Simple box from y=0 down to y=-brim_height.
-                #
-                # FIX: Added top cap at y=0 facing DOWN to close the hole in the
-                # bottom brim where each pillar intersects it. The brim ring
-                # geometry covers the full annulus at y=0 facing DOWN, but it is
-                # built without knowledge of the pillar angular slots, so those
-                # slots remain open without this cap.
+                # The full-circle brim ring now covers y=0 completely, so this
+                # filler only needs the 4 side walls + the bottom cap at
+                # y=-brim_height.  No top cap needed.
                 # --------------------------------------------------------------
                 if has_bot_brim:
                     bb_r_in  = Rb
@@ -540,17 +504,7 @@ class LithophaneBuilder:
                     # Bottom cap at y=-brim_height (normal DOWN)
                     indices.append([row_bot+0, row_bot+1, row_bot+2])
                     indices.append([row_bot+1, row_bot+3, row_bot+2])
-
-                    # TOP CAP at y=0 (normal DOWN) — closes the hole in the
-                    # bottom brim where the pillar angular slot was open.
-                    ct_bb = len(vertices)
-                    for ci in range(4):
-                        vertices.append(list(vertices[row_top + ci]))
-                        colors.append([0.55, 0.55, 0.55])
-                        normals.append([0.0, -1.0, 0.0])
-                    # Normal DOWN: wind clockwise when viewed from below
-                    indices.append([ct_bb+0, ct_bb+2, ct_bb+1])
-                    indices.append([ct_bb+1, ct_bb+2, ct_bb+3])
+                    # No top cap - the full-circle brim ring covers y=0 completely
 
         # ---- lamp socket + spokes -----------------------------------------------
         y_bed = -float(p.bottom_brim_height) if p.bottom_brim_height > 0 else 0.0

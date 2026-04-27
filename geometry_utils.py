@@ -50,11 +50,17 @@ def stitch_wall(vertices, colors, normals, indices,
 def build_ring_xyz_at_radius(radius: float, y: float,
                               ncols: int, num_panels: int,
                               panels_present: List[bool]) -> List[List[float]]:
+    """Build a complete-circle ring at the given radius and y height.
+
+    Always emits all num_panels arcs so the ring is a closed, gap-free
+    circle.  panels_present is kept as a parameter for API compatibility
+    but is no longer used to skip arcs – doing so left angular gaps at
+    missing-panel boundaries (exactly where pillars sit), causing holes
+    in the bottom brim.
+    """
     ring = []
     theta_step = 2.0 * np.pi / num_panels
-    for p_idx, present in enumerate(panels_present):
-        if not present:
-            continue
+    for p_idx in range(num_panels):
         for j in range(ncols):
             u     = j / (ncols - 1)
             angle = p_idx * theta_step + u * theta_step
