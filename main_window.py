@@ -28,19 +28,19 @@ class MainWindow(QMainWindow):
         self.preview_labels = []
 
         self.params = BuildParams(
-            height=100.0, top_diam=120.0, bottom_diam=160.0,
+            height=163.0, top_diam=170.0, bottom_diam=200.0,
             min_thickness=0.30, max_thickness=3.00,
             top_brim_height=3.0,  top_brim_thickness=5.0,
             bottom_brim_height=3.0, bottom_brim_thickness=5.0,
             frame_width=5.0, frame_thickness=3.5,
             nrows=120, ncols=160, num_panels=self.panel_count,
             shade_type=self.cur_lampshade_type,
-            socket_enabled=False, socket_inner_diam=26.0,
-            socket_wall=2.5, socket_height=60.0,
-            socket_lip_height=4.0, socket_lip_overhang=4.0,
+            socket_enabled=False, socket_inner_diam=32.5,
+            socket_wall=3.5, socket_height=25.0,
+            socket_lip_height=3.5, socket_lip_overhang=1.5,
             spokes_enabled=False, spoke_count=4,
-            spoke_width=4.0, spoke_thickness=2.0,
-            top_brim_fillet=2.0, top_brim_fillet_steps=6,
+            spoke_width=6.0, spoke_thickness=6.0,
+            top_brim_fillet=4.9, top_brim_fillet_steps=6,
         )
 
         self._build_ui()
