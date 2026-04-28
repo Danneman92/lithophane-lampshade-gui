@@ -155,7 +155,6 @@ class MainWindow(QMainWindow):
         self.images_group = box
         return box
 
-    # ------ Geometry group (matches LithophaneMaker Lithophane Parameters) ------
     def _geometry_group(self):
         box  = QGroupBox("Lithophane Parameters")
         form = QFormLayout()
@@ -163,39 +162,36 @@ class MainWindow(QMainWindow):
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         h    = self._form_spin(self.params.height,        20,  600, 1, 1,    "mm",
-                               "Height of the lamp. Your printer build volume must be taller than this.")
+                               "Height of the lamp.")
         td   = self._form_spin(self.params.top_diam,      20, 1000, 1, 1,    "mm",
                                "Top diameter of the lampshade.")
         bd   = self._form_spin(self.params.bottom_diam,   20, 1000, 1, 1,    "mm",
                                "Bottom diameter of the lampshade.")
         tmin = self._form_spin(self.params.min_thickness, 0.4,  5,  2, 0.05, "mm",
-                               "Minimum thickness (brightest / most transparent region).\n"
-                               "Should be >= 1.5× your nozzle diameter.")
+                               "Minimum wall thickness (brightest areas).")
         tmax = self._form_spin(self.params.max_thickness, 0.8, 10,  2, 0.05, "mm",
-                               "Maximum thickness (darkest / most opaque region).")
-        res  = self._form_spin(self.params.resolution_mm, 0.1, 5.0, 2, 0.05, "mm/px",
-                               "Distance between unique thickness values on the STL.\n"
-                               "Smaller = finer detail but much larger file.\n"
-                               "0.5 mm/px is a good starting point.")
+                               "Maximum wall thickness (darkest areas).")
+        res  = self._form_spin(self.params.resolution_mm, 0.2, 5.0, 2, 0.1,  "mm/px",
+                               "Mesh resolution. 0.5 = one vertex per 0.5 mm.\n"
+                               "Lower = more detail, larger file, slower generation.")
         gamma = self._form_spin(self.params.gamma, 0.5, 4.0, 1, 0.1, "",
-                                "Gamma correction for brightness→thickness mapping.\n"
-                                "2.2 matches LithophaneMaker.com default.")
+                                "Gamma correction (2.2 = LithophaneMaker default).")
 
-        h.valueChanged.connect(   lambda v: setattr(self.params, "height",        v))
-        td.valueChanged.connect(  lambda v: setattr(self.params, "top_diam",      v))
-        bd.valueChanged.connect(  lambda v: setattr(self.params, "bottom_diam",   v))
-        tmin.valueChanged.connect(lambda v: setattr(self.params, "min_thickness",  v))
-        tmax.valueChanged.connect(lambda v: setattr(self.params, "max_thickness",  v))
-        res.valueChanged.connect( lambda v: setattr(self.params, "resolution_mm",  v))
-        gamma.valueChanged.connect(lambda v: setattr(self.params, "gamma",         v))
+        h.valueChanged.connect(    lambda v: setattr(self.params, "height",        v))
+        td.valueChanged.connect(   lambda v: setattr(self.params, "top_diam",      v))
+        bd.valueChanged.connect(   lambda v: setattr(self.params, "bottom_diam",   v))
+        tmin.valueChanged.connect( lambda v: setattr(self.params, "min_thickness",  v))
+        tmax.valueChanged.connect( lambda v: setattr(self.params, "max_thickness",  v))
+        res.valueChanged.connect(  lambda v: setattr(self.params, "resolution_mm",  v))
+        gamma.valueChanged.connect(lambda v: setattr(self.params, "gamma",          v))
 
-        form.addRow("Height",             self._right_wrap(h))
-        form.addRow("Top Diameter",       self._right_wrap(td))
-        form.addRow("Bottom Diameter",    self._right_wrap(bd))
-        form.addRow("Min Thickness",      self._right_wrap(tmin))
-        form.addRow("Max Thickness",      self._right_wrap(tmax))
-        form.addRow("Resolution",         self._right_wrap(res))
-        form.addRow("Gamma",              self._right_wrap(gamma))
+        form.addRow("Height",          self._right_wrap(h))
+        form.addRow("Top Diameter",    self._right_wrap(td))
+        form.addRow("Bottom Diameter", self._right_wrap(bd))
+        form.addRow("Min Thickness",   self._right_wrap(tmin))
+        form.addRow("Max Thickness",   self._right_wrap(tmax))
+        form.addRow("Resolution",      self._right_wrap(res))
+        form.addRow("Gamma",           self._right_wrap(gamma))
         box.setLayout(form)
         return box
 
@@ -204,15 +200,12 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
         contrast   = self._form_spin(self.params.contrast,   0.1, 3.0, 2, 0.05, "",
                                      "Contrast multiplier. 1.0 = unchanged.")
         brightness = self._form_spin(self.params.brightness, -0.5, 0.5, 2, 0.02, "",
-                                     "Brightness offset added after contrast. 0 = unchanged.")
-
+                                     "Brightness offset. 0 = unchanged.")
         contrast.valueChanged.connect(  lambda v: setattr(self.params, "contrast",   v))
         brightness.valueChanged.connect(lambda v: setattr(self.params, "brightness", v))
-
         form.addRow("Contrast",   self._right_wrap(contrast))
         form.addRow("Brightness", self._right_wrap(brightness))
         box.setLayout(form)
@@ -223,18 +216,12 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        gap_mm = self._form_spin(self.params.gap_mm, 0.0, 20.0, 1, 0.5, "mm",
-                                 "Arc-length width of gap at the shade surface.")
-        gap_br = self._form_spin(self.params.gap_brightness, 0.0, 1.0, 2, 0.05, "",
-                                 "0 = gap is maximum thickness (opaque).\n"
-                                 "1 = gap is minimum thickness (clear).")
-
+        gap_mm = self._form_spin(self.params.gap_mm, 0.0, 20.0, 1, 0.5, "mm")
+        gap_br = self._form_spin(self.params.gap_brightness, 0.0, 1.0, 2, 0.05, "")
         gap_mm.valueChanged.connect(lambda v: setattr(self.params, "gap_mm",         v))
         gap_br.valueChanged.connect(lambda v: setattr(self.params, "gap_brightness", v))
-
-        form.addRow("Gap Width",       self._right_wrap(gap_mm))
-        form.addRow("Gap Brightness",  self._right_wrap(gap_br))
+        form.addRow("Gap Width",      self._right_wrap(gap_mm))
+        form.addRow("Gap Brightness", self._right_wrap(gap_br))
         box.setLayout(form)
         return box
 
@@ -243,55 +230,40 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
         self.waves_check = QCheckBox("Enable waves")
         self.waves_check.setChecked(self.params.waves_enabled)
-        self.waves_check.setToolTip("Adds sinusoidal waves to the lamp profile.")
         wc = QSpinBox(); wc.setRange(1, 20); wc.setValue(self.params.wave_count)
-        wh = self._form_spin(self.params.wave_height_mm, 0.5, 30.0, 1, 0.5, "mm",
-                             "Peak-to-trough height of each wave.")
-        wc.setToolTip("Number of full waves along the lamp height.")
-
+        wh = self._form_spin(self.params.wave_height_mm, 0.5, 30.0, 1, 0.5, "mm")
         self.waves_check.stateChanged.connect(
             lambda s: (setattr(self.params, "waves_enabled", bool(s)), self.generate_model()))
-        wc.valueChanged.connect(lambda v: setattr(self.params, "wave_count",      v))
-        wh.valueChanged.connect(lambda v: setattr(self.params, "wave_height_mm",  v))
-
-        form.addRow("",             self.waves_check)
-        form.addRow("Wave Count",   wc)
-        form.addRow("Wave Height",  self._right_wrap(wh))
+        wc.valueChanged.connect(lambda v: setattr(self.params, "wave_count",     v))
+        wh.valueChanged.connect(lambda v: setattr(self.params, "wave_height_mm", v))
+        form.addRow("",            self.waves_check)
+        form.addRow("Wave Count",  wc)
+        form.addRow("Wave Height", self._right_wrap(wh))
         box.setLayout(form)
         return box
 
     def _brims_group(self):
-        box  = QGroupBox("Base Width and Height (Brims)")
+        box  = QGroupBox("Brims")
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        tbh = self._form_spin(self.params.top_brim_height,        0.0, 100, 2, 0.5, "mm",
-                              "Height of the collar at the top of the lamp.")
-        tbt = self._form_spin(self.params.top_brim_thickness,     0.0,  50, 2, 0.5, "mm",
-                              "Radial thickness of the top collar.")
-        tbo = self._form_spin(self.params.top_brim_overhang_angle, 0.0, 60, 1, 1.0, "°",
-                              "Overhang angle on the outer wall of the top brim.\n"
-                              "Higher angle means less overhang — matches LithophaneMaker.com.")
-        bbh = self._form_spin(self.params.bottom_brim_height,     0.0, 100, 2, 0.5, "mm",
-                              "Height of the base ring at the bottom of the lamp.")
-        bbt = self._form_spin(self.params.bottom_brim_thickness,  0.0,  50, 2, 0.5, "mm",
-                              "Radial thickness of the base ring.")
-
-        tbh.valueChanged.connect(lambda v: setattr(self.params, "top_brim_height",        v))
-        tbt.valueChanged.connect(lambda v: setattr(self.params, "top_brim_thickness",     v))
-        tbo.valueChanged.connect(lambda v: setattr(self.params, "top_brim_overhang_angle",v))
-        bbh.valueChanged.connect(lambda v: setattr(self.params, "bottom_brim_height",     v))
-        bbt.valueChanged.connect(lambda v: setattr(self.params, "bottom_brim_thickness",  v))
-
-        form.addRow("Top Brim Height",     self._right_wrap(tbh))
-        form.addRow("Top Brim Thickness",  self._right_wrap(tbt))
-        form.addRow("Top Overhang Angle",  self._right_wrap(tbo))
-        form.addRow("Bot Brim Height",     self._right_wrap(bbh))
-        form.addRow("Bot Brim Thickness",  self._right_wrap(bbt))
+        tbh = self._form_spin(self.params.top_brim_height,         0.0, 100, 2, 0.5, "mm")
+        tbt = self._form_spin(self.params.top_brim_thickness,      0.0,  50, 2, 0.5, "mm")
+        tbo = self._form_spin(self.params.top_brim_overhang_angle, 0.0,  60, 1, 1.0, "\u00b0")
+        bbh = self._form_spin(self.params.bottom_brim_height,      0.0, 100, 2, 0.5, "mm")
+        bbt = self._form_spin(self.params.bottom_brim_thickness,   0.0,  50, 2, 0.5, "mm")
+        tbh.valueChanged.connect(lambda v: setattr(self.params, "top_brim_height",         v))
+        tbt.valueChanged.connect(lambda v: setattr(self.params, "top_brim_thickness",      v))
+        tbo.valueChanged.connect(lambda v: setattr(self.params, "top_brim_overhang_angle", v))
+        bbh.valueChanged.connect(lambda v: setattr(self.params, "bottom_brim_height",      v))
+        bbt.valueChanged.connect(lambda v: setattr(self.params, "bottom_brim_thickness",   v))
+        form.addRow("Top Brim Height",    self._right_wrap(tbh))
+        form.addRow("Top Brim Thickness", self._right_wrap(tbt))
+        form.addRow("Top Overhang Angle", self._right_wrap(tbo))
+        form.addRow("Bot Brim Height",    self._right_wrap(bbh))
+        form.addRow("Bot Brim Thickness", self._right_wrap(bbt))
         box.setLayout(form)
         return box
 
@@ -314,23 +286,16 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
         self.socket_check = QCheckBox("Enable socket adapter")
         self.socket_check.setChecked(self.params.socket_enabled)
         self.socket_check.setToolTip(
-            "Hollow cylinder interface to the lamp fitting.\n"
-            "Exported as a SEPARATE STL file — print alongside the shade.")
-        sk_id = self._form_spin(self.params.socket_inner_diam, 10, 120, 1, 0.5, "mm",
-                                "Inner bore diameter.\nE27 ≈ 26 mm  |  E14 ≈ 17 mm  |  GU10 ≈ 25 mm")
-        sk_w  = self._form_spin(self.params.socket_wall,       0.8, 10, 1, 0.5, "mm",
-                                "Cylinder wall thickness.")
-        sk_h  = self._form_spin(self.params.socket_height,     5,  200, 1, 1,   "mm",
-                                "Total height of the adapter cylinder.")
-        sk_lh = self._form_spin(self.params.socket_lip_height, 0,   20, 1, 0.5, "mm",
-                                "Height of the retaining lip at the top.")
-        sk_lo = self._form_spin(self.params.socket_lip_overhang, 0, 20, 1, 0.5, "mm",
-                                "How far the lip narrows the bore inward.")
-
+            "Exported as a SEPARATE STL file alongside the shade.")
+        sk_id = self._form_spin(self.params.socket_inner_diam,   10, 120, 1, 0.5, "mm",
+                                "E27 \u2248 26 mm  |  E14 \u2248 17 mm  |  GU10 \u2248 25 mm")
+        sk_w  = self._form_spin(self.params.socket_wall,          0.8, 10, 1, 0.5, "mm")
+        sk_h  = self._form_spin(self.params.socket_height,        5,  200, 1, 1,   "mm")
+        sk_lh = self._form_spin(self.params.socket_lip_height,    0,   20, 1, 0.5, "mm")
+        sk_lo = self._form_spin(self.params.socket_lip_overhang,  0,   20, 1, 0.5, "mm")
         self.socket_check.stateChanged.connect(
             lambda s: (setattr(self.params, "socket_enabled", bool(s)), self.generate_model()))
         sk_id.valueChanged.connect(lambda v: setattr(self.params, "socket_inner_diam",   v))
@@ -338,26 +303,20 @@ class MainWindow(QMainWindow):
         sk_h.valueChanged.connect( lambda v: setattr(self.params, "socket_height",       v))
         sk_lh.valueChanged.connect(lambda v: setattr(self.params, "socket_lip_height",   v))
         sk_lo.valueChanged.connect(lambda v: setattr(self.params, "socket_lip_overhang", v))
-
         form.addRow("",               self.socket_check)
         form.addRow("Inner Bore Diam",self._right_wrap(sk_id))
         form.addRow("Wall Thickness", self._right_wrap(sk_w))
         form.addRow("Adapter Height", self._right_wrap(sk_h))
         form.addRow("Lip Height",     self._right_wrap(sk_lh))
         form.addRow("Lip Overhang",   self._right_wrap(sk_lo))
-
         self.spokes_check = QCheckBox("Enable spokes")
         self.spokes_check.setChecked(self.params.spokes_enabled)
-        self.spokes_check.setToolTip("Radial ribs from socket tube to shade inner wall.")
         sp_n = QSpinBox(); sp_n.setRange(2, 16); sp_n.setValue(self.params.spoke_count)
         sp_w = self._form_spin(self.params.spoke_width, 1.0, 30, 1, 0.5, "mm")
-        sp_n.setToolTip("Number of spokes.")
-
         self.spokes_check.stateChanged.connect(
             lambda s: (setattr(self.params, "spokes_enabled", bool(s)), self.generate_model()))
         sp_n.valueChanged.connect(lambda v: setattr(self.params, "spoke_count", v))
         sp_w.valueChanged.connect(lambda v: setattr(self.params, "spoke_width",  v))
-
         form.addRow("",            self.spokes_check)
         form.addRow("Spoke Count", sp_n)
         form.addRow("Spoke Width", self._right_wrap(sp_w))
@@ -367,22 +326,29 @@ class MainWindow(QMainWindow):
     def _lighting_group(self):
         box    = QGroupBox("Preview Lighting")
         layout = QFormLayout()
-        self.light_x          = QSlider(Qt.Horizontal); self.light_x.setRange(-200, 200); self.light_x.setValue(0)
-        self.light_y          = QSlider(Qt.Horizontal); self.light_y.setRange(-200, 200); self.light_y.setValue(-40)
-        self.light_z          = QSlider(Qt.Horizontal); self.light_z.setRange(-200, 200); self.light_z.setValue(0)
-        self.intensity_slider = QSlider(Qt.Horizontal); self.intensity_slider.setRange(1, 500); self.intensity_slider.setValue(110)
+        self.light_x          = QSlider(Qt.Horizontal); self.light_x.setRange(-500, 500); self.light_x.setValue(100)
+        self.light_y          = QSlider(Qt.Horizontal); self.light_y.setRange(-500, 500); self.light_y.setValue(300)
+        self.light_z          = QSlider(Qt.Horizontal); self.light_z.setRange(-500, 500); self.light_z.setValue(200)
+        self.intensity_slider = QSlider(Qt.Horizontal); self.intensity_slider.setRange(1, 300); self.intensity_slider.setValue(110)
         self.alpha_slider     = QSlider(Qt.Horizontal); self.alpha_slider.setRange(10, 100); self.alpha_slider.setValue(100)
 
         def update_light():
-            self.gl_widget.set_light_pos([self.light_x.value(), self.light_y.value(), self.light_z.value()])
+            self.gl_widget.set_light_pos([
+                self.light_x.value(),
+                self.light_y.value(),
+                self.light_z.value()])
             self.gl_widget.set_light_intensity(self.intensity_slider.value() / 100.0)
 
         def update_alpha():
             self.gl_widget.set_alpha(self.alpha_slider.value() / 100.0)
 
-        for sl in [self.light_x, self.light_y, self.light_z, self.intensity_slider, self.alpha_slider]:
-            sl.sliderPressed.connect(lambda: self.gl_widget.set_active_geometry('lowres'))
-            sl.sliderReleased.connect(lambda: self.gl_widget.set_active_geometry('highres'))
+        for sl in [self.light_x, self.light_y, self.light_z,
+                   self.intensity_slider, self.alpha_slider]:
+            sl.sliderPressed.connect(
+                lambda: self.gl_widget.set_active_geometry('lowres'))
+            sl.sliderReleased.connect(
+                lambda: self.gl_widget.set_active_geometry('highres'))
+
         self.light_x.valueChanged.connect(update_light)
         self.light_y.valueChanged.connect(update_light)
         self.light_z.valueChanged.connect(update_light)
@@ -404,11 +370,11 @@ class MainWindow(QMainWindow):
         gen.setObjectName("primaryButton")
         gen.clicked.connect(self.generate_model)
         row.addWidget(gen)
-        exp_all = QPushButton("Save STL (shade + socket)…")
-        exp_all.setToolTip("Saves shade_shade.stl and shade_socket.stl separately.")
+        exp_all = QPushButton("Save STL (shade + socket)\u2026")
+        exp_all.setToolTip("Saves *_shade.stl and *_socket.stl as separate files.")
         exp_all.clicked.connect(self.export_all_stl)
         row.addWidget(exp_all)
-        exp_shade = QPushButton("Save Shade STL only…")
+        exp_shade = QPushButton("Save Shade only\u2026")
         exp_shade.clicked.connect(self.export_shade_stl)
         row.addWidget(exp_shade)
         row.addStretch(1)
@@ -435,7 +401,7 @@ class MainWindow(QMainWindow):
         left_scroll.setWidget(left_col)
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setMaximumWidth(350)
+        left_scroll.setMaximumWidth(360)
 
         self.gl_widget = GLWidget()
         view_bar = QHBoxLayout()
@@ -471,35 +437,46 @@ class MainWindow(QMainWindow):
             return
         self.image_paths[idx] = path
         name = path.split("/")[-1]
-        self.img_labels[idx].setText(name if len(name) <= 28 else name[:25] + "...")
+        self.img_labels[idx].setText(
+            name if len(name) <= 28 else name[:25] + "...")
         pix = load_thumbnail_pixmap(path, 110, 110)
         if pix:
             self.preview_labels[idx].setPixmap(pix)
             self.preview_labels[idx].setToolTip(name)
         else:
             self.preview_labels[idx].setText("Preview")
+        self.generate_model()
 
     def generate_model(self):
-        imgs = [Image.open(p).convert("L") if p else None for p in self.image_paths]
+        imgs = [
+            Image.open(p).convert("L") if p else None
+            for p in self.image_paths
+        ]
         self.params.shade_type = self.cur_lampshade_type
         self.params.num_panels = self.panel_count
 
-        # High-res shade
         builder_hi = LithophaneBuilder(self.params)
         V, I, N, C = builder_hi.build(imgs)
         self._shade_mesh = (V, I, N, C)
-        highres = dict(verts=V.astype(np.float32), inds=I.astype(np.uint32),
-                       norms=N.astype(np.float32), cols=C.astype(np.float32))
+        highres = dict(
+            verts=V.astype(np.float32),
+            inds=I.astype(np.uint32),
+            norms=N.astype(np.float32),
+            cols=C.astype(np.float32),
+        )
 
-        # Low-res preview (4× coarser resolution)
-        lo_params   = dataclasses.replace(self.params, resolution_mm=self.params.resolution_mm * 4)
-        builder_lo  = LithophaneBuilder(lo_params)
+        lo_params  = dataclasses.replace(
+            self.params, resolution_mm=self.params.resolution_mm * 4)
+        builder_lo = LithophaneBuilder(lo_params)
         Vlo, Ilo, Nlo, Clo = builder_lo.build(imgs)
-        lowres = dict(verts=Vlo.astype(np.float32), inds=Ilo.astype(np.uint32),
-                      norms=Nlo.astype(np.float32), cols=Clo.astype(np.float32))
-        self.gl_widget.set_geometries(highres, lowres)
+        lowres = dict(
+            verts=Vlo.astype(np.float32),
+            inds=Ilo.astype(np.uint32),
+            norms=Nlo.astype(np.float32),
+            cols=Clo.astype(np.float32),
+        )
 
-        # Socket mesh (separate)
+        self.gl_widget.set_geometries(highres, lowres)
         self._socket_mesh = builder_hi.build_socket()
 
     def export_all_stl(self):
@@ -511,8 +488,9 @@ class MainWindow(QMainWindow):
             return
         try:
             written = save_all_stl(path, self._shade_mesh, self._socket_mesh)
-            msg = "Files saved:\n" + "\n".join(written.values())
-            QMessageBox.information(self, "Export STL", msg)
+            QMessageBox.information(
+                self, "Export STL",
+                "Files saved:\n" + "\n".join(written.values()))
         except Exception as e:
             QMessageBox.critical(self, "Export STL", f"Failed:\n{e}")
 
