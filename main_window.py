@@ -1,4 +1,5 @@
-"""Main window — parameter set matches LithophaneMaker.com Lamp Lithophane."""
+"""Main window - mirrors every parameter from lithophanemaker.com/Lamp Lithophane.html"""
+import dataclasses
 import numpy as np
 from PIL import Image
 from PyQt5.QtWidgets import (
@@ -7,429 +8,330 @@ from PyQt5.QtWidgets import (
     QGroupBox, QFormLayout, QSplitter, QSizePolicy, QMessageBox,
     QSlider, QComboBox, QSpinBox, QCheckBox,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from glwidget import GLWidget
 from image_utils import load_thumbnail_pixmap
 from builder import LithophaneBuilder, BuildParams
 from export_stl import save_all_stl, save_binary_stl
-import dataclasses
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Lithophane Lamp Maker")
-        self.resize(1300, 960)
+        self.resize(1350, 980)
 
-        self.lampshade_types    = ["Normal", "Sphere", "Flat"]
-        self.cur_lampshade_type = "Normal"
-        self.panel_count        = 4
-
-        self.image_paths    = [None] * self.panel_count
-        self.img_labels     = []
+        self.panel_count  = 4
+        self.image_paths  = [None] * self.panel_count
+        self.img_labels   = []
         self.preview_labels = []
 
-        self.params = BuildParams(
-            height=163.0, top_diam=170.0, bottom_diam=200.0,
-            min_thickness=0.8,  max_thickness=3.0,
-            resolution_mm=0.5,
-            gamma=2.2,
-            contrast=1.0, brightness=0.0,
-            num_panels=self.panel_count,
-            shade_type=self.cur_lampshade_type,
-            gap_mm=2.0, gap_brightness=0.0,
-            waves_enabled=False, wave_count=4, wave_height_mm=3.0,
-            top_brim_height=8.0,    top_brim_thickness=5.0,
-            top_brim_overhang_angle=45.0,
-            bottom_brim_height=5.0, bottom_brim_thickness=5.0,
-            frame_width=5.0, frame_thickness=3.5,
-            socket_enabled=False, socket_inner_diam=32.5,
-            socket_wall=3.5, socket_height=25.0,
-            socket_lip_height=3.5, socket_lip_overhang=1.5,
-            spokes_enabled=False, spoke_count=4,
-            spoke_width=6.0, spoke_thickness=6.0,
-        )
+        self.params = BuildParams()
 
         self._shade_mesh  = None
         self._socket_mesh = None
 
+        # debounce timer so spinbox typing doesn't rebuild on every keystroke
+        self._regen_timer = QTimer(self)
+        self._regen_timer.setSingleShot(True)
+        self._regen_timer.setInterval(400)
+        self._regen_timer.timeout.connect(self.generate_model)
+
         self._build_ui()
 
-    # ------------------------------------------------------------------
-    def _form_spin(self, value, lo, hi, decimals=2, step=0.5, suffix="", tip=""):
+    # ------------------------------------------------------------------ helpers
+    def _dspin(self, val, lo, hi, dec=1, step=1.0, suffix="", tip=""):
         w = QDoubleSpinBox()
         w.setRange(lo, hi)
-        w.setDecimals(decimals)
+        w.setDecimals(dec)
         w.setSingleStep(step)
-        w.setValue(value)
-        if suffix:
-            w.setSuffix(suffix)
-        if tip:
-            w.setToolTip(tip)
-        w.setMaximumWidth(160)
-        w.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        w.setValue(val)
+        if suffix: w.setSuffix(" " + suffix)
+        if tip:    w.setToolTip(tip)
+        w.setMinimumWidth(90)
         return w
 
-    def _right_wrap(self, w):
-        box = QWidget()
-        h   = QHBoxLayout(box)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addStretch(1)
-        h.addWidget(w, 0, Qt.AlignRight | Qt.AlignVCenter)
-        box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        return box
+    def _ispin(self, val, lo, hi, tip=""):
+        w = QSpinBox()
+        w.setRange(lo, hi)
+        w.setValue(val)
+        if tip: w.setToolTip(tip)
+        w.setMinimumWidth(90)
+        return w
 
-    # ------------------------------------------------------------------
-    def _type_and_panel_group(self):
-        box    = QGroupBox("Lampshade Type & Panels")
-        layout = QFormLayout()
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(self.lampshade_types)
-        self.type_combo.setCurrentText(self.cur_lampshade_type)
-        self.type_combo.currentTextChanged.connect(self._on_lampshade_type_change)
-        self.panel_spin = QSpinBox()
-        self.panel_spin.setRange(1, 12)
-        self.panel_spin.setValue(self.panel_count)
-        self.panel_spin.valueChanged.connect(self._on_panel_count_change)
-        layout.addRow("Type:",   self.type_combo)
-        layout.addRow("Panels:", self.panel_spin)
-        box.setLayout(layout)
-        return box
+    def _connect(self, widget, attr):
+        """Wire any spin/check to params.<attr> and schedule regeneration."""
+        def _set(v):
+            setattr(self.params, attr, v)
+            self._regen_timer.start()
+        if isinstance(widget, QCheckBox):
+            widget.stateChanged.connect(lambda s: _set(bool(s)))
+        elif isinstance(widget, (QDoubleSpinBox, QSpinBox)):
+            widget.valueChanged.connect(_set)
+        elif isinstance(widget, QComboBox):
+            widget.currentTextChanged.connect(_set)
+        return widget
 
-    def _on_lampshade_type_change(self, type_):
-        self.cur_lampshade_type = type_
-        self.params.shade_type  = type_
-        self.generate_model()
+    def _row(self, form, label, widget):
+        form.addRow(label, widget)
+        return widget
 
-    def _on_panel_count_change(self, count):
-        self.panel_count       = count
-        self.params.num_panels = count
-        self.image_paths       = [None] * count
-        self._refresh_images_group()
-        self.generate_model()
+    # ------------------------------------------------------------------ groups
+    def _grp_lithophane(self):
+        """Section 1 - Lithophane Parameters (matches website exactly)"""
+        g = QGroupBox("1. Lithophane Parameters")
+        f = QFormLayout()
 
-    def _refresh_images_group(self):
-        parent = self.images_group.parent()
-        idx    = parent.layout().indexOf(self.images_group)
-        parent.layout().removeWidget(self.images_group)
-        self.images_group.deleteLater()
-        self.images_group = self._images_group()
-        parent.layout().insertWidget(idx, self.images_group)
+        # Outer Diameter
+        self.w_outer_diam = self._dspin(self.params.outer_diameter, 20, 2000, 1, 5, "mm",
+            "Outer diameter of the lampshade")
+        self._connect(self.w_outer_diam, "outer_diameter")
+        f.addRow("Outer Diameter", self.w_outer_diam)
 
-    def _images_group(self):
-        box  = QGroupBox("Images")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(8)
+        # Wall Height
+        self.w_wall_height = self._dspin(self.params.wall_height, 10, 1000, 1, 5, "mm",
+            "Height of the lithophane wall")
+        self._connect(self.w_wall_height, "wall_height")
+        f.addRow("Wall Height", self.w_wall_height)
+
+        # Wall Thickness (layer thickness range)
+        self.w_min_thick = self._dspin(self.params.min_thickness, 0.5, 5, 2, 0.1, "mm",
+            "Minimum wall thickness (lightest / most transparent)")
+        self._connect(self.w_min_thick, "min_thickness")
+        f.addRow("Min Thickness", self.w_min_thick)
+
+        self.w_max_thick = self._dspin(self.params.max_thickness, 0.5, 10, 2, 0.1, "mm",
+            "Maximum wall thickness (darkest / most opaque)")
+        self._connect(self.w_max_thick, "max_thickness")
+        f.addRow("Max Thickness", self.w_max_thick)
+
+        # Number of Sides (panels)
+        self.w_num_sides = self._ispin(self.params.num_sides, 1, 12,
+            "Number of image panels / sides")
+        self._connect(self.w_num_sides, "num_sides")
+        self.w_num_sides.valueChanged.connect(self._on_sides_changed)
+        f.addRow("Number of Sides", self.w_num_sides)
+
+        # Frame Width
+        self.w_frame_width = self._dspin(self.params.frame_width, 0, 30, 1, 0.5, "mm",
+            "Width of the solid frame pillar between panels")
+        self._connect(self.w_frame_width, "frame_width")
+        f.addRow("Frame Width", self.w_frame_width)
+
+        # Inner Diameter (top opening)
+        self.w_inner_diam = self._dspin(self.params.inner_diameter, 0, 1000, 1, 5, "mm",
+            "Inner diameter at the top of the shade (0 = auto from wall thickness)")
+        self._connect(self.w_inner_diam, "inner_diameter")
+        f.addRow("Inner Diameter (top)", self.w_inner_diam)
+
+        # Top thickness (collar)
+        self.w_top_thickness = self._dspin(self.params.top_thickness, 0, 30, 1, 0.5, "mm",
+            "Thickness of the top collar / brim")
+        self._connect(self.w_top_thickness, "top_thickness")
+        f.addRow("Top Thickness", self.w_top_thickness)
+
+        # Top Height
+        self.w_top_height = self._dspin(self.params.top_height, 0, 100, 1, 0.5, "mm",
+            "Height of the solid top collar")
+        self._connect(self.w_top_height, "top_height")
+        f.addRow("Top Height", self.w_top_height)
+
+        # Bottom thickness
+        self.w_bot_thickness = self._dspin(self.params.bottom_thickness, 0, 30, 1, 0.5, "mm",
+            "Thickness of the bottom ring")
+        self._connect(self.w_bot_thickness, "bottom_thickness")
+        f.addRow("Bottom Thickness", self.w_bot_thickness)
+
+        # Bottom Height
+        self.w_bot_height = self._dspin(self.params.bottom_height, 0, 100, 1, 0.5, "mm",
+            "Height of the solid bottom ring")
+        self._connect(self.w_bot_height, "bottom_height")
+        f.addRow("Bottom Height", self.w_bot_height)
+
+        g.setLayout(f)
+        return g
+
+    def _grp_interface(self):
+        """Section 2 - Interface Parameters"""
+        g = QGroupBox("2. Interface Parameters (Lamp Socket)")
+        f = QFormLayout()
+
+        # Lamp Socket Outer Diameter
+        self.w_sock_outer = self._dspin(self.params.socket_outer_diameter, 5, 200, 1, 0.5, "mm",
+            "Outer diameter of the lamp socket / neck you're fitting to")
+        self._connect(self.w_sock_outer, "socket_outer_diameter")
+        f.addRow("Socket Outer Diam", self.w_sock_outer)
+
+        # Socket Wall Thickness
+        self.w_sock_wall = self._dspin(self.params.socket_wall_thickness, 0.5, 10, 1, 0.5, "mm",
+            "Wall thickness of the socket adapter ring")
+        self._connect(self.w_sock_wall, "socket_wall_thickness")
+        f.addRow("Socket Wall Thick", self.w_sock_wall)
+
+        # Socket Height
+        self.w_sock_height = self._dspin(self.params.socket_height, 1, 200, 1, 1, "mm",
+            "Height of the socket adapter cylinder")
+        self._connect(self.w_sock_height, "socket_height")
+        f.addRow("Socket Height", self.w_sock_height)
+
+        # Tolerance (gap between socket and lamp neck)
+        self.w_sock_tol = self._dspin(self.params.socket_tolerance, 0, 2, 2, 0.05, "mm",
+            "Clearance gap so the adapter slides onto the lamp neck")
+        self._connect(self.w_sock_tol, "socket_tolerance")
+        f.addRow("Tolerance", self.w_sock_tol)
+
+        # Lip Height
+        self.w_lip_h = self._dspin(self.params.lip_height, 0, 20, 1, 0.5, "mm",
+            "Height of the retention lip inside the socket")
+        self._connect(self.w_lip_h, "lip_height")
+        f.addRow("Lip Height", self.w_lip_h)
+
+        # Lip Width
+        self.w_lip_w = self._dspin(self.params.lip_width, 0, 10, 1, 0.5, "mm",
+            "Width (overhang) of the retention lip")
+        self._connect(self.w_lip_w, "lip_width")
+        f.addRow("Lip Width", self.w_lip_w)
+
+        g.setLayout(f)
+        return g
+
+    def _grp_spokes(self):
+        """Section 3 - Spoke Parameters"""
+        g = QGroupBox("3. Spoke Parameters")
+        f = QFormLayout()
+
+        # Number of Spokes
+        self.w_spoke_count = self._ispin(self.params.spoke_count, 0, 16,
+            "Number of spokes connecting socket to shade (0 = no spokes)")
+        self._connect(self.w_spoke_count, "spoke_count")
+        f.addRow("Number of Spokes", self.w_spoke_count)
+
+        # Spoke Width
+        self.w_spoke_width = self._dspin(self.params.spoke_width, 1, 50, 1, 0.5, "mm",
+            "Width of each spoke")
+        self._connect(self.w_spoke_width, "spoke_width")
+        f.addRow("Spoke Width", self.w_spoke_width)
+
+        # Spoke Thickness
+        self.w_spoke_thick = self._dspin(self.params.spoke_thickness, 0.5, 20, 1, 0.5, "mm",
+            "Thickness (height) of each spoke")
+        self._connect(self.w_spoke_thick, "spoke_thickness")
+        f.addRow("Spoke Thickness", self.w_spoke_thick)
+
+        g.setLayout(f)
+        return g
+
+    def _grp_images(self):
+        g = QGroupBox("Images")
+        self._img_grid = QGridLayout()
+        self._img_grid.setSpacing(6)
+        self._rebuild_image_slots()
+        g.setLayout(self._img_grid)
+        self.images_group = g
+        return g
+
+    def _rebuild_image_slots(self):
+        # clear grid
+        while self._img_grid.count():
+            item = self._img_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         self.img_labels     = []
         self.preview_labels = []
         for i in range(self.panel_count):
-            left_stack = QWidget()
-            ls = QVBoxLayout(left_stack)
-            ls.setContentsMargins(0, 0, 0, 0)
-            ls.setSpacing(4)
-            load_btn = QPushButton(f"Load Photo {i+1}")
-            load_btn.setObjectName("loadButton")
-            load_btn.clicked.connect(lambda _, idx=i: self.select_image(idx))
-            name = QLabel("No file")
-            name.setObjectName("fileLabel")
-            name.setAlignment(Qt.AlignCenter)
-            name.setWordWrap(True)
-            name.setMinimumWidth(120)
-            name.setMaximumWidth(200)
-            ls.addWidget(load_btn)
-            ls.addWidget(name)
-            thumb = QLabel()
-            thumb.setFixedSize(110, 110)
+            col = QWidget()
+            vl  = QVBoxLayout(col)
+            vl.setContentsMargins(0,0,0,0)
+            vl.setSpacing(4)
+            btn = QPushButton(f"Load Photo {i+1}")
+            btn.clicked.connect(lambda _, idx=i: self.select_image(idx))
+            lbl = QLabel("No file")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setWordWrap(True)
+            thumb = QLabel("Preview")
+            thumb.setFixedSize(100, 100)
             thumb.setAlignment(Qt.AlignCenter)
-            thumb.setObjectName("thumbnail")
-            thumb.setText("Preview")
-            thumb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            grid.addWidget(left_stack, i, 0, alignment=Qt.AlignTop)
-            grid.addWidget(thumb,      i, 1, alignment=Qt.AlignTop)
-            self.img_labels.append(name)
+            vl.addWidget(btn)
+            vl.addWidget(lbl)
+            vl.addWidget(thumb)
+            self._img_grid.addWidget(col, 0, i)
+            self.img_labels.append(lbl)
             self.preview_labels.append(thumb)
-        grid.setColumnStretch(0, 0)
-        grid.setColumnStretch(1, 1)
-        box.setLayout(grid)
-        self.images_group = box
-        return box
 
-    def _geometry_group(self):
-        box  = QGroupBox("Lithophane Parameters")
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        h    = self._form_spin(self.params.height,        20,  600, 1, 1,    "mm",
-                               "Height of the lamp.")
-        td   = self._form_spin(self.params.top_diam,      20, 1000, 1, 1,    "mm",
-                               "Top diameter of the lampshade.")
-        bd   = self._form_spin(self.params.bottom_diam,   20, 1000, 1, 1,    "mm",
-                               "Bottom diameter of the lampshade.")
-        tmin = self._form_spin(self.params.min_thickness, 0.4,  5,  2, 0.05, "mm",
-                               "Minimum wall thickness (brightest areas).")
-        tmax = self._form_spin(self.params.max_thickness, 0.8, 10,  2, 0.05, "mm",
-                               "Maximum wall thickness (darkest areas).")
-        res  = self._form_spin(self.params.resolution_mm, 0.2, 5.0, 2, 0.1,  "mm/px",
-                               "Mesh resolution. 0.5 = one vertex per 0.5 mm.\n"
-                               "Lower = more detail, larger file, slower generation.")
-        gamma = self._form_spin(self.params.gamma, 0.5, 4.0, 1, 0.1, "",
-                                "Gamma correction (2.2 = LithophaneMaker default).")
-
-        h.valueChanged.connect(    lambda v: setattr(self.params, "height",        v))
-        td.valueChanged.connect(   lambda v: setattr(self.params, "top_diam",      v))
-        bd.valueChanged.connect(   lambda v: setattr(self.params, "bottom_diam",   v))
-        tmin.valueChanged.connect( lambda v: setattr(self.params, "min_thickness",  v))
-        tmax.valueChanged.connect( lambda v: setattr(self.params, "max_thickness",  v))
-        res.valueChanged.connect(  lambda v: setattr(self.params, "resolution_mm",  v))
-        gamma.valueChanged.connect(lambda v: setattr(self.params, "gamma",          v))
-
-        form.addRow("Height",          self._right_wrap(h))
-        form.addRow("Top Diameter",    self._right_wrap(td))
-        form.addRow("Bottom Diameter", self._right_wrap(bd))
-        form.addRow("Min Thickness",   self._right_wrap(tmin))
-        form.addRow("Max Thickness",   self._right_wrap(tmax))
-        form.addRow("Resolution",      self._right_wrap(res))
-        form.addRow("Gamma",           self._right_wrap(gamma))
-        box.setLayout(form)
-        return box
-
-    def _image_quality_group(self):
-        box  = QGroupBox("Image Quality")
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        contrast   = self._form_spin(self.params.contrast,   0.1, 3.0, 2, 0.05, "",
-                                     "Contrast multiplier. 1.0 = unchanged.")
-        brightness = self._form_spin(self.params.brightness, -0.5, 0.5, 2, 0.02, "",
-                                     "Brightness offset. 0 = unchanged.")
-        contrast.valueChanged.connect(  lambda v: setattr(self.params, "contrast",   v))
-        brightness.valueChanged.connect(lambda v: setattr(self.params, "brightness", v))
-        form.addRow("Contrast",   self._right_wrap(contrast))
-        form.addRow("Brightness", self._right_wrap(brightness))
-        box.setLayout(form)
-        return box
-
-    def _gap_group(self):
-        box  = QGroupBox("Gap Between Panels")
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        gap_mm = self._form_spin(self.params.gap_mm, 0.0, 20.0, 1, 0.5, "mm")
-        gap_br = self._form_spin(self.params.gap_brightness, 0.0, 1.0, 2, 0.05, "")
-        gap_mm.valueChanged.connect(lambda v: setattr(self.params, "gap_mm",         v))
-        gap_br.valueChanged.connect(lambda v: setattr(self.params, "gap_brightness", v))
-        form.addRow("Gap Width",      self._right_wrap(gap_mm))
-        form.addRow("Gap Brightness", self._right_wrap(gap_br))
-        box.setLayout(form)
-        return box
-
-    def _waves_group(self):
-        box  = QGroupBox("Wave Profile")
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.waves_check = QCheckBox("Enable waves")
-        self.waves_check.setChecked(self.params.waves_enabled)
-        wc = QSpinBox(); wc.setRange(1, 20); wc.setValue(self.params.wave_count)
-        wh = self._form_spin(self.params.wave_height_mm, 0.5, 30.0, 1, 0.5, "mm")
-        self.waves_check.stateChanged.connect(
-            lambda s: (setattr(self.params, "waves_enabled", bool(s)), self.generate_model()))
-        wc.valueChanged.connect(lambda v: setattr(self.params, "wave_count",     v))
-        wh.valueChanged.connect(lambda v: setattr(self.params, "wave_height_mm", v))
-        form.addRow("",            self.waves_check)
-        form.addRow("Wave Count",  wc)
-        form.addRow("Wave Height", self._right_wrap(wh))
-        box.setLayout(form)
-        return box
-
-    def _brims_group(self):
-        box  = QGroupBox("Brims")
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        tbh = self._form_spin(self.params.top_brim_height,         0.0, 100, 2, 0.5, "mm")
-        tbt = self._form_spin(self.params.top_brim_thickness,      0.0,  50, 2, 0.5, "mm")
-        tbo = self._form_spin(self.params.top_brim_overhang_angle, 0.0,  60, 1, 1.0, "\u00b0")
-        bbh = self._form_spin(self.params.bottom_brim_height,      0.0, 100, 2, 0.5, "mm")
-        bbt = self._form_spin(self.params.bottom_brim_thickness,   0.0,  50, 2, 0.5, "mm")
-        tbh.valueChanged.connect(lambda v: setattr(self.params, "top_brim_height",         v))
-        tbt.valueChanged.connect(lambda v: setattr(self.params, "top_brim_thickness",      v))
-        tbo.valueChanged.connect(lambda v: setattr(self.params, "top_brim_overhang_angle", v))
-        bbh.valueChanged.connect(lambda v: setattr(self.params, "bottom_brim_height",      v))
-        bbt.valueChanged.connect(lambda v: setattr(self.params, "bottom_brim_thickness",   v))
-        form.addRow("Top Brim Height",    self._right_wrap(tbh))
-        form.addRow("Top Brim Thickness", self._right_wrap(tbt))
-        form.addRow("Top Overhang Angle", self._right_wrap(tbo))
-        form.addRow("Bot Brim Height",    self._right_wrap(bbh))
-        form.addRow("Bot Brim Thickness", self._right_wrap(bbt))
-        box.setLayout(form)
-        return box
-
-    def _frames_group(self):
-        box  = QGroupBox("Frames")
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        fw = self._form_spin(self.params.frame_width,     0.0, 50, 2, 0.5, "mm")
-        ft = self._form_spin(self.params.frame_thickness, 0.0, 50, 2, 0.5, "mm")
-        fw.valueChanged.connect(lambda v: setattr(self.params, "frame_width",     v))
-        ft.valueChanged.connect(lambda v: setattr(self.params, "frame_thickness", v))
-        form.addRow("Frame Width",     self._right_wrap(fw))
-        form.addRow("Frame Thickness", self._right_wrap(ft))
-        box.setLayout(form)
-        return box
-
-    def _socket_group(self):
-        box  = QGroupBox("Interface (Lamp Socket Adapter)")
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.socket_check = QCheckBox("Enable socket adapter")
-        self.socket_check.setChecked(self.params.socket_enabled)
-        self.socket_check.setToolTip(
-            "Exported as a SEPARATE STL file alongside the shade.")
-        sk_id = self._form_spin(self.params.socket_inner_diam,   10, 120, 1, 0.5, "mm",
-                                "E27 \u2248 26 mm  |  E14 \u2248 17 mm  |  GU10 \u2248 25 mm")
-        sk_w  = self._form_spin(self.params.socket_wall,          0.8, 10, 1, 0.5, "mm")
-        sk_h  = self._form_spin(self.params.socket_height,        5,  200, 1, 1,   "mm")
-        sk_lh = self._form_spin(self.params.socket_lip_height,    0,   20, 1, 0.5, "mm")
-        sk_lo = self._form_spin(self.params.socket_lip_overhang,  0,   20, 1, 0.5, "mm")
-        self.socket_check.stateChanged.connect(
-            lambda s: (setattr(self.params, "socket_enabled", bool(s)), self.generate_model()))
-        sk_id.valueChanged.connect(lambda v: setattr(self.params, "socket_inner_diam",   v))
-        sk_w.valueChanged.connect( lambda v: setattr(self.params, "socket_wall",         v))
-        sk_h.valueChanged.connect( lambda v: setattr(self.params, "socket_height",       v))
-        sk_lh.valueChanged.connect(lambda v: setattr(self.params, "socket_lip_height",   v))
-        sk_lo.valueChanged.connect(lambda v: setattr(self.params, "socket_lip_overhang", v))
-        form.addRow("",               self.socket_check)
-        form.addRow("Inner Bore Diam",self._right_wrap(sk_id))
-        form.addRow("Wall Thickness", self._right_wrap(sk_w))
-        form.addRow("Adapter Height", self._right_wrap(sk_h))
-        form.addRow("Lip Height",     self._right_wrap(sk_lh))
-        form.addRow("Lip Overhang",   self._right_wrap(sk_lo))
-        self.spokes_check = QCheckBox("Enable spokes")
-        self.spokes_check.setChecked(self.params.spokes_enabled)
-        sp_n = QSpinBox(); sp_n.setRange(2, 16); sp_n.setValue(self.params.spoke_count)
-        sp_w = self._form_spin(self.params.spoke_width, 1.0, 30, 1, 0.5, "mm")
-        self.spokes_check.stateChanged.connect(
-            lambda s: (setattr(self.params, "spokes_enabled", bool(s)), self.generate_model()))
-        sp_n.valueChanged.connect(lambda v: setattr(self.params, "spoke_count", v))
-        sp_w.valueChanged.connect(lambda v: setattr(self.params, "spoke_width",  v))
-        form.addRow("",            self.spokes_check)
-        form.addRow("Spoke Count", sp_n)
-        form.addRow("Spoke Width", self._right_wrap(sp_w))
-        box.setLayout(form)
-        return box
-
-    def _lighting_group(self):
-        box    = QGroupBox("Preview Lighting")
-        layout = QFormLayout()
-        self.light_x          = QSlider(Qt.Horizontal); self.light_x.setRange(-500, 500); self.light_x.setValue(100)
-        self.light_y          = QSlider(Qt.Horizontal); self.light_y.setRange(-500, 500); self.light_y.setValue(300)
-        self.light_z          = QSlider(Qt.Horizontal); self.light_z.setRange(-500, 500); self.light_z.setValue(200)
-        self.intensity_slider = QSlider(Qt.Horizontal); self.intensity_slider.setRange(1, 300); self.intensity_slider.setValue(110)
-        self.alpha_slider     = QSlider(Qt.Horizontal); self.alpha_slider.setRange(10, 100); self.alpha_slider.setValue(100)
-
-        def update_light():
-            self.gl_widget.set_light_pos([
-                self.light_x.value(),
-                self.light_y.value(),
-                self.light_z.value()])
-            self.gl_widget.set_light_intensity(self.intensity_slider.value() / 100.0)
-
-        def update_alpha():
-            self.gl_widget.set_alpha(self.alpha_slider.value() / 100.0)
-
-        for sl in [self.light_x, self.light_y, self.light_z,
-                   self.intensity_slider, self.alpha_slider]:
-            sl.sliderPressed.connect(
-                lambda: self.gl_widget.set_active_geometry('lowres'))
-            sl.sliderReleased.connect(
-                lambda: self.gl_widget.set_active_geometry('highres'))
-
-        self.light_x.valueChanged.connect(update_light)
-        self.light_y.valueChanged.connect(update_light)
-        self.light_z.valueChanged.connect(update_light)
-        self.intensity_slider.valueChanged.connect(update_light)
-        self.alpha_slider.valueChanged.connect(update_alpha)
-
-        layout.addRow("Light X",      self.light_x)
-        layout.addRow("Light Y",      self.light_y)
-        layout.addRow("Light Z",      self.light_z)
-        layout.addRow("Intensity",    self.intensity_slider)
-        layout.addRow("Transparency", self.alpha_slider)
-        box.setLayout(layout)
-        return box
-
-    def _actions_group(self):
-        box = QGroupBox("Actions")
+    def _grp_actions(self):
+        g   = QGroupBox("Export")
         row = QHBoxLayout()
-        gen = QPushButton("Generate Lampshade")
-        gen.setObjectName("primaryButton")
-        gen.clicked.connect(self.generate_model)
-        row.addWidget(gen)
-        exp_all = QPushButton("Save STL (shade + socket)\u2026")
-        exp_all.setToolTip("Saves *_shade.stl and *_socket.stl as separate files.")
-        exp_all.clicked.connect(self.export_all_stl)
-        row.addWidget(exp_all)
-        exp_shade = QPushButton("Save Shade only\u2026")
-        exp_shade.clicked.connect(self.export_shade_stl)
-        row.addWidget(exp_shade)
+        b1  = QPushButton("Generate")
+        b1.clicked.connect(self.generate_model)
+        b2  = QPushButton("Save STL (shade + socket)…")
+        b2.setToolTip("Saves _shade.stl and _socket.stl as separate files")
+        b2.clicked.connect(self.export_all_stl)
+        b3  = QPushButton("Save Shade only…")
+        b3.clicked.connect(self.export_shade_stl)
+        row.addWidget(b1); row.addWidget(b2); row.addWidget(b3)
         row.addStretch(1)
-        box.setLayout(row)
-        return box
+        g.setLayout(row)
+        return g
 
+    def _grp_view(self):
+        row = QHBoxLayout()
+        for name in ["Iso","Front","Back","Left","Right","Top","Bottom"]:
+            b = QPushButton(name)
+            b.setFixedWidth(58)
+            b.clicked.connect(lambda _, n=name: self.gl_widget.set_view(n))
+            row.addWidget(b)
+        row.addStretch(1)
+        w = QWidget(); w.setLayout(row)
+        return w
+
+    # ------------------------------------------------------------------ UI build
     def _build_ui(self):
-        left_col = QWidget()
-        left_v   = QVBoxLayout(left_col)
-        left_v.addWidget(self._type_and_panel_group())
-        left_v.addWidget(self._images_group())
-        left_v.addWidget(self._geometry_group())
-        left_v.addWidget(self._image_quality_group())
-        left_v.addWidget(self._gap_group())
-        left_v.addWidget(self._waves_group())
-        left_v.addWidget(self._brims_group())
-        left_v.addWidget(self._frames_group())
-        left_v.addWidget(self._socket_group())
-        left_v.addWidget(self._lighting_group())
-        left_v.addWidget(self._actions_group())
-        left_v.addStretch(1)
+        left = QWidget()
+        lv   = QVBoxLayout(left)
+        lv.addWidget(self._grp_images())
+        lv.addWidget(self._grp_lithophane())
+        lv.addWidget(self._grp_interface())
+        lv.addWidget(self._grp_spokes())
+        lv.addWidget(self._grp_actions())
+        lv.addStretch(1)
 
-        left_scroll = QScrollArea()
-        left_scroll.setWidget(left_col)
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setMaximumWidth(360)
+        scroll = QScrollArea()
+        scroll.setWidget(left)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(340)
 
         self.gl_widget = GLWidget()
-        view_bar = QHBoxLayout()
-        for name in ["Iso", "Front", "Back", "Left", "Right", "Top", "Bottom"]:
-            b = QPushButton(name)
-            b.setObjectName("viewButton")
-            b.clicked.connect(lambda _, n=name: self.gl_widget.set_view(n))
-            view_bar.addWidget(b)
-        view_bar.addStretch(1)
-        vw = QWidget(); vw.setLayout(view_bar)
 
-        right   = QWidget()
-        right_v = QVBoxLayout(right)
-        right_v.addWidget(vw)
-        right_v.addWidget(self.gl_widget, stretch=1)
+        right = QWidget()
+        rv    = QVBoxLayout(right)
+        rv.addWidget(self._grp_view())
+        rv.addWidget(self.gl_widget, stretch=1)
 
         splitter = QSplitter()
-        splitter.addWidget(left_scroll)
+        splitter.addWidget(scroll)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
-        wrapper = QWidget()
-        root    = QHBoxLayout(wrapper)
-        root.addWidget(splitter)
-        self.setCentralWidget(wrapper)
+        cw = QWidget()
+        QHBoxLayout(cw).addWidget(splitter)
+        self.setCentralWidget(cw)
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ slots
+    def _on_sides_changed(self, n):
+        self.panel_count = n
+        self.params.num_sides = n
+        self.image_paths = (self.image_paths + [None]*n)[:n]
+        self._rebuild_image_slots()
+        for i, p in enumerate(self.image_paths):
+            if p:
+                name = p.split("/")[-1]
+                self.img_labels[i].setText(name[:28])
+                pix = load_thumbnail_pixmap(p, 100, 100)
+                if pix: self.preview_labels[i].setPixmap(pix)
+        self._regen_timer.start()
+
     def select_image(self, idx):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.bmp)")
@@ -437,14 +339,10 @@ class MainWindow(QMainWindow):
             return
         self.image_paths[idx] = path
         name = path.split("/")[-1]
-        self.img_labels[idx].setText(
-            name if len(name) <= 28 else name[:25] + "...")
-        pix = load_thumbnail_pixmap(path, 110, 110)
-        if pix:
-            self.preview_labels[idx].setPixmap(pix)
-            self.preview_labels[idx].setToolTip(name)
-        else:
-            self.preview_labels[idx].setText("Preview")
+        self.img_labels[idx].setText(name[:28] + ("..." if len(name) > 28 else ""))
+        pix = load_thumbnail_pixmap(path, 100, 100)
+        if pix: self.preview_labels[idx].setPixmap(pix)
+        else:   self.preview_labels[idx].setText("Preview")
         self.generate_model()
 
     def generate_model(self):
@@ -452,47 +350,38 @@ class MainWindow(QMainWindow):
             Image.open(p).convert("L") if p else None
             for p in self.image_paths
         ]
-        self.params.shade_type = self.cur_lampshade_type
-        self.params.num_panels = self.panel_count
+        self.params.num_sides = self.panel_count
 
-        builder_hi = LithophaneBuilder(self.params)
-        V, I, N, C = builder_hi.build(imgs)
-        self._shade_mesh = (V, I, N, C)
-        highres = dict(
-            verts=V.astype(np.float32),
-            inds=I.astype(np.uint32),
-            norms=N.astype(np.float32),
-            cols=C.astype(np.float32),
-        )
+        # high-res build
+        bhi = LithophaneBuilder(self.params)
+        V, I, N, C = bhi.build(imgs)
+        self._shade_mesh  = (V, I, N, C)
+        self._socket_mesh = bhi.build_socket()
 
-        lo_params  = dataclasses.replace(
+        highres = _geo_dict(V, I, N, C)
+
+        # low-res preview (4x coarser)
+        lo_p = dataclasses.replace(
             self.params, resolution_mm=self.params.resolution_mm * 4)
-        builder_lo = LithophaneBuilder(lo_params)
-        Vlo, Ilo, Nlo, Clo = builder_lo.build(imgs)
-        lowres = dict(
-            verts=Vlo.astype(np.float32),
-            inds=Ilo.astype(np.uint32),
-            norms=Nlo.astype(np.float32),
-            cols=Clo.astype(np.float32),
-        )
+        blo = LithophaneBuilder(lo_p)
+        Vl, Il, Nl, Cl = blo.build(imgs)
+        lowres = _geo_dict(Vl, Il, Nl, Cl)
 
         self.gl_widget.set_geometries(highres, lowres)
-        self._socket_mesh = builder_hi.build_socket()
 
     def export_all_stl(self):
         if self._shade_mesh is None:
             self.generate_model()
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save STL base name", "lithophane.stl", "STL Binary (*.stl)")
+            self, "Save STL", "lithophane.stl", "STL Binary (*.stl)")
         if not path:
             return
         try:
             written = save_all_stl(path, self._shade_mesh, self._socket_mesh)
-            QMessageBox.information(
-                self, "Export STL",
-                "Files saved:\n" + "\n".join(written.values()))
+            QMessageBox.information(self, "Saved",
+                "Files:\n" + "\n".join(written.values()))
         except Exception as e:
-            QMessageBox.critical(self, "Export STL", f"Failed:\n{e}")
+            QMessageBox.critical(self, "Error", str(e))
 
     def export_shade_stl(self):
         if self._shade_mesh is None:
@@ -503,7 +392,16 @@ class MainWindow(QMainWindow):
             return
         try:
             V, I = self._shade_mesh[0], self._shade_mesh[1]
-            save_binary_stl(path, V, I, header_text="Lithophane Shade (mm)")
-            QMessageBox.information(self, "Export STL", f"Saved: {path}")
+            save_binary_stl(path, V, I)
+            QMessageBox.information(self, "Saved", path)
         except Exception as e:
-            QMessageBox.critical(self, "Export STL", f"Failed:\n{e}")
+            QMessageBox.critical(self, "Error", str(e))
+
+
+def _geo_dict(V, I, N, C):
+    return dict(
+        verts=V.astype(np.float32),
+        inds=I.astype(np.uint32),
+        norms=N.astype(np.float32),
+        cols=C.astype(np.float32),
+    )
