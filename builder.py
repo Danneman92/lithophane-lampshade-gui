@@ -1,23 +1,13 @@
-"""LithophaneMaker-parity lamp builder.
-
-Key design decisions matching lithophanemaker.com:
-  - Resolution driven by mm/px, not fixed row/col counts.
-  - Gamma-corrected brightness → thickness mapping.
-  - Per-panel contrast + brightness adjustments.
-  - Smooth per-vertex normals computed from face geometry.
-  - Configurable gap between panels (width + brightness).
-  - Optional wave profile on lamp body.
-  - Brim is a clean annular band (no inner disc) — lamp opening stays open.
-  - Socket / interface ring + spokes built as *separate* mesh objects so
-    they can be exported as separate STL files without topology conflicts.
-"""
-from dataclasses import dataclass, field
+"""LithophaneMaker-parity lamp builder  —  fully vectorised (no Python vertex loops)."""
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import numpy as np
-from geometry_utils import (
-    stitch_rings, stitch_wall,
-    build_ring_xyz_at_radius, compute_smooth_normals,
-)
+
+
+# Hard cap to keep generation fast regardless of resolution setting.
+# 500x500 per panel = 250k verts per panel = still very fine at 163mm height.
+MAX_ROWS = 500
+MAX_COLS = 500
 
 
 @dataclass
@@ -27,135 +17,180 @@ class BuildParams:
     top_diam: float     = 170.0
     bottom_diam: float  = 200.0
 
-    # --- lithophane image quality ---
+    # --- lithophane quality ---
     min_thickness: float  = 0.8
     max_thickness: float  = 3.0
-    resolution_mm: float  = 0.5   # mm per pixel (smaller = finer, larger STL)
-    gamma: float          = 2.2   # perceptual brightness correction
-    contrast: float       = 1.0   # multiplier on pixel contrast [0.5 – 2.0]
-    brightness: float     = 0.0   # additive offset [-0.5 – +0.5]
+    resolution_mm: float  = 0.5    # mm per pixel
+    gamma: float          = 2.2
+    contrast: float       = 1.0
+    brightness: float     = 0.0
 
     # --- panels ---
-    num_panels: int   = 4
-    shade_type: str   = "Normal"  # Normal | Sphere | Flat
+    num_panels: int  = 4
+    shade_type: str  = "Normal"   # Normal | Sphere | Flat
 
     # --- gap between panels ---
-    gap_mm: float         = 2.0   # angular width of gap at shade surface
-    gap_brightness: float = 0.0   # 0 = max thickness (dark), 1 = min thickness (clear)
+    gap_mm: float         = 2.0
+    gap_brightness: float = 0.0
 
     # --- wave profile ---
-    waves_enabled: bool  = False
-    wave_count: int      = 4
+    waves_enabled: bool   = False
+    wave_count: int       = 4
     wave_height_mm: float = 3.0
 
-    # --- top brim (lip / collar) ---
-    top_brim_height: float     = 8.0
-    top_brim_thickness: float  = 5.0
-    top_brim_overhang_angle: float = 45.0  # degrees; 0 = straight wall
+    # --- brims ---
+    top_brim_height: float          = 8.0
+    top_brim_thickness: float       = 5.0
+    top_brim_overhang_angle: float  = 45.0
+    bottom_brim_height: float       = 5.0
+    bottom_brim_thickness: float    = 5.0
 
-    # --- bottom brim (base ring) ---
-    bottom_brim_height: float     = 5.0
-    bottom_brim_thickness: float  = 5.0
-
-    # --- frames / pillars between panels ---
+    # --- frames ---
     frame_width: float     = 5.0
     frame_thickness: float = 3.5
 
-    # --- socket adapter (interface to lamp) ---
-    socket_enabled: bool         = False
-    socket_inner_diam: float     = 32.5  # E27 ≈ 26 mm, E14 ≈ 17 mm
-    socket_wall: float           = 3.5
-    socket_height: float         = 25.0
-    socket_lip_height: float     = 3.5
-    socket_lip_overhang: float   = 1.5
+    # --- socket ---
+    socket_enabled: bool       = False
+    socket_inner_diam: float   = 32.5
+    socket_wall: float         = 3.5
+    socket_height: float       = 25.0
+    socket_lip_height: float   = 3.5
+    socket_lip_overhang: float = 1.5
 
     # --- spokes ---
-    spokes_enabled: bool  = False
-    spoke_count: int      = 4
-    spoke_width: float    = 6.0
+    spokes_enabled: bool   = False
+    spoke_count: int       = 4
+    spoke_width: float     = 6.0
     spoke_thickness: float = 6.0
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _smooth_normals(V: np.ndarray, I: np.ndarray) -> np.ndarray:
+    """Accumulate face normals per vertex and normalise."""
+    N = np.zeros_like(V)
+    v0, v1, v2 = V[I[:, 0]], V[I[:, 1]], V[I[:, 2]]
+    fn = np.cross(v1 - v0, v2 - v0)
+    np.add.at(N, I[:, 0], fn)
+    np.add.at(N, I[:, 1], fn)
+    np.add.at(N, I[:, 2], fn)
+    mag = np.linalg.norm(N, axis=1, keepdims=True)
+    return N / np.where(mag < 1e-12, 1.0, mag)
+
+
+def _quad_indices(base: int, nrows: int, ncols: int,
+                  flip: bool = False) -> np.ndarray:
+    """Return (F,3) triangle indices for a (nrows x ncols) grid starting at `base`."""
+    r = np.arange(nrows - 1, dtype=np.int32)
+    c = np.arange(ncols - 1, dtype=np.int32)
+    rr, cc = np.meshgrid(r, c, indexing='ij')  # (R-1, C-1)
+    a = base + rr * ncols + cc
+    b = base + rr * ncols + cc + 1
+    c_ = base + (rr + 1) * ncols + cc
+    d  = base + (rr + 1) * ncols + cc + 1
+    if not flip:
+        t1 = np.stack([a, b, c_], axis=-1).reshape(-1, 3)
+        t2 = np.stack([b, d, c_], axis=-1).reshape(-1, 3)
+    else:
+        t1 = np.stack([a, c_, b],  axis=-1).reshape(-1, 3)
+        t2 = np.stack([b, c_, d],  axis=-1).reshape(-1, 3)
+    return np.concatenate([t1, t2], axis=0)
+
+
+def _ring_indices(a_idx: np.ndarray, b_idx: np.ndarray,
+                  flip: bool = False) -> np.ndarray:
+    """Stitch two equal-length index arrays into a quad strip."""
+    n = len(a_idx)
+    ai  = a_idx
+    ain = np.roll(a_idx, -1)
+    bi  = b_idx
+    bin_ = np.roll(b_idx, -1)
+    if not flip:
+        t1 = np.stack([ai,  bi,  ain], axis=-1)
+        t2 = np.stack([ain, bi,  bin_], axis=-1)
+    else:
+        t1 = np.stack([ai,  ain, bi],  axis=-1)
+        t2 = np.stack([ain, bin_, bi], axis=-1)
+    return np.concatenate([t1, t2], axis=0)
+
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
 
 class LithophaneBuilder:
     def __init__(self, params: BuildParams):
         self.p = params
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Public
+    # -----------------------------------------------------------------------
     def build(self, imgs) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return (V, I, N, C) for the shade + brim + frames."""
-        if self.p.shade_type == "Sphere":
+        if self.p.shade_type == 'Sphere':
             return self._build_sphere(imgs)
-        if self.p.shade_type == "Flat":
+        if self.p.shade_type == 'Flat':
             return self._build_flat(imgs)
         return self._build_cylinder(imgs)
 
-    def build_socket(self, imgs=None) -> Optional[Tuple]:
-        """Return (V, I, N, C) for socket+spokes only, or None if disabled."""
+    def build_socket(self) -> Optional[Tuple]:
         p = self.p
         if not p.socket_enabled or p.socket_height <= 0:
             return None
-        vertices, colors, normals, indices = [], [], [], []
-        mid_gray = (0.6, 0.6, 0.6)
-        Rb = float(p.bottom_diam) / 2.0
+        Vl, Il = [], []
+        r_in  = p.socket_inner_diam / 2.0
+        r_out = r_in + p.socket_wall
         y_bed = -float(p.bottom_brim_height) if p.bottom_brim_height > 0 else 0.0
-        r_sock_in  = p.socket_inner_diam / 2.0
-        r_sock_out = r_sock_in + p.socket_wall
-        self._build_socket(
-            vertices, colors, normals, indices,
+        V, I = _build_socket_mesh(
             y_base=y_bed, y_top=float(p.socket_height),
-            r_inner=r_sock_in, r_outer=r_sock_out,
-            lip_height=p.socket_lip_height, lip_overhang=p.socket_lip_overhang,
-            color=mid_gray,
+            r_inner=r_in, r_outer=r_out,
+            lip_height=p.socket_lip_height,
+            lip_overhang=p.socket_lip_overhang,
         )
+        Vl.append(V); Il.append(I if len(Vl) == 1 else I + len(Vl[0]))
         if p.spokes_enabled and p.spoke_count > 0:
-            self._build_spokes(
-                vertices, colors, normals, indices,
+            Vs, Is = _build_spokes_mesh(
                 y_bot=y_bed, y_top=y_bed + float(p.spoke_thickness),
-                r_hub=r_sock_out, r_rim=Rb,
-                n_spokes=p.spoke_count, spoke_w=p.spoke_width, color=mid_gray,
+                r_hub=r_out, r_rim=float(p.bottom_diam) / 2.0,
+                n_spokes=p.spoke_count, spoke_w=p.spoke_width,
             )
-        V = np.array(vertices, dtype=np.float64)
-        I = np.array(indices,  dtype=np.int32)
-        C = np.array(colors,   dtype=np.float64)
-        N = compute_smooth_normals(V, I) if len(I) > 0 else np.zeros_like(V)
-        return V, I, N, C
+            offset = sum(len(v) for v in Vl)
+            Vl.append(Vs); Il.append(Is + offset)
+        V_all = np.concatenate(Vl, axis=0)
+        I_all = np.concatenate(Il, axis=0)
+        C_all = np.full((len(V_all), 3), 0.6, dtype=np.float64)
+        N_all = _smooth_normals(V_all, I_all)
+        return V_all, I_all, N_all, C_all
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Image → thickness  (vectorised)
+    # -----------------------------------------------------------------------
     def _img_to_thickness(self, img, nrows: int, ncols: int) -> np.ndarray:
-        """Convert a PIL image to a (nrows, ncols) thickness array.
-
-        Pipeline (matches LithophaneMaker):
-          1. Resize to target resolution
-          2. Apply contrast + brightness
-          3. Gamma-decode (perceptual → linear light)
-          4. Map: bright pixel → thin (transparent), dark → thick (opaque)
-        """
         p = self.p
-        data = np.asarray(img.resize((ncols, nrows)), dtype=np.float32) / 255.0
-        # contrast & brightness
-        data = np.clip((data - 0.5) * float(p.contrast) + 0.5 + float(p.brightness), 0.0, 1.0)
-        # gamma correction
-        gamma = max(float(p.gamma), 0.1)
-        data = np.power(data, 1.0 / gamma)
-        # bright → thin, dark → thick
-        T = float(p.min_thickness) + (1.0 - data) * (float(p.max_thickness) - float(p.min_thickness))
-        return T.astype(np.float64)
+        data = np.asarray(
+            img.resize((ncols, nrows)), dtype=np.float32) / 255.0
+        data = np.clip(
+            (data - 0.5) * float(p.contrast) + 0.5 + float(p.brightness),
+            0.0, 1.0)
+        data = np.power(data, 1.0 / max(float(p.gamma), 0.1))
+        return (float(p.min_thickness)
+                + (1.0 - data) * (float(p.max_thickness) - float(p.min_thickness))
+                ).astype(np.float64)
 
-    def _wave_offset(self, y: float, H: float) -> float:
-        """Radial offset due to wave profile at height y."""
+    # -----------------------------------------------------------------------
+    # Wave offset  (vectorised, accepts scalar or array y)
+    # -----------------------------------------------------------------------
+    def _wave_r(self, y, H):
         p = self.p
         if not p.waves_enabled or p.wave_count <= 0 or p.wave_height_mm <= 0:
-            return 0.0
-        phase = (y / H) * p.wave_count * 2.0 * np.pi
+            return np.zeros_like(y) if isinstance(y, np.ndarray) else 0.0
+        phase = (y / max(H, 1e-6)) * p.wave_count * 2.0 * np.pi
         return float(p.wave_height_mm) * 0.5 * (1.0 - np.cos(phase))
 
-    # ------------------------------------------------------------------
-    # Cylinder (Normal) shade
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Normal (cylinder) shade  —  fully vectorised
+    # -----------------------------------------------------------------------
     def _build_cylinder(self, imgs):
         p = self.p
         H   = float(p.height)
@@ -163,593 +198,552 @@ class LithophaneBuilder:
         Rb  = float(p.bottom_diam) / 2.0
         t_min = float(p.min_thickness)
         t_max = float(p.max_thickness)
-        num_panels  = p.num_panels
-        theta_step  = 2.0 * np.pi / num_panels
+        NP    = p.num_panels
+        ts    = 2.0 * np.pi / NP        # theta step per panel
 
-        # Resolution: compute nrows/ncols from mm/px
-        circ_per_panel = (Rt + Rb) * 0.5 * theta_step  # arc length per panel
-        res  = max(float(p.resolution_mm), 0.1)
-        ncols = max(int(round(circ_per_panel / res)), 8)
-        nrows = max(int(round(H / res)), 8)
+        res   = max(float(p.resolution_mm), 0.1)
+        circ  = (Rt + Rb) * 0.5 * ts
+        ncols = int(np.clip(round(circ / res),  8, MAX_COLS))
+        nrows = int(np.clip(round(H   / res),   8, MAX_ROWS))
 
-        # Gap angular half-width in radians at average radius
         r_avg    = (Rt + Rb) * 0.5
         gap_half = (float(p.gap_mm) * 0.5) / max(r_avg, 1.0)
         gap_t    = t_min + (1.0 - float(p.gap_brightness)) * (t_max - t_min)
 
-        panels_present = [img is not None for img in imgs]
+        # v in [0,1] top→bottom, y = H*(1-v)
+        v_arr = np.linspace(0.0, 1.0, nrows, dtype=np.float64)          # (R,)
+        y_arr = H * (1.0 - v_arr)                                        # (R,)
+        Rv    = (1.0 - v_arr) * Rt + v_arr * Rb                         # (R,)
+        wave  = self._wave_r(y_arr, H)                                   # (R,)
 
-        vertices, colors, normals, indices = [], [], [], []
-        top_outer_ring, top_inner_ring = [], []
-        bot_outer_ring, bot_inner_ring = [], []
+        u_arr = np.linspace(0.0, 1.0, ncols, dtype=np.float64)          # (C,)
 
-        panel_rows_angles: List[List[np.ndarray]] = []
-        panel_rows_radii:  List[List[np.ndarray]] = []
-        panel_rows_y:      List[np.ndarray]        = []
+        V_list, C_list, N_list, I_list = [], [], [], []
+        offset = 0
+
+        # --- track top/bottom outer rings for brim stitching ---
+        top_out_rings = []
+        bot_out_rings = []
 
         for p_idx, img in enumerate(imgs):
-            # --- precompute thickness grid ---
+            arc_start = p_idx * ts + gap_half
+            arc_end   = p_idx * ts + ts - gap_half
+            angles = arc_start + u_arr * (arc_end - arc_start)  # (C,)
+
+            # --- thickness grid ---
             if img is not None:
-                T = self._img_to_thickness(img, nrows, ncols)  # (nrows, ncols)
-                gray = 1.0 - np.clip(
-                    (T - t_min) / max(t_max - t_min, 1e-6), 0.0, 1.0)
+                T = self._img_to_thickness(img, nrows, ncols)   # (R, C)
             else:
-                T    = np.full((nrows, ncols), gap_t, dtype=np.float64)
-                gray = np.full((nrows, ncols), 0.6,   dtype=np.float64)
+                T = np.full((nrows, ncols), gap_t, dtype=np.float64)
 
-            row_angles_list, row_radii_list = [], []
-            row_y = np.empty(nrows, dtype=np.float64)
+            gray = 1.0 - np.clip(
+                (T - t_min) / max(t_max - t_min, 1e-6), 0.0, 1.0)      # (R, C)
 
-            base = len(vertices)
-            for i in range(nrows):
-                v   = i / max(nrows - 1, 1)
-                y   = H * (1.0 - v)
-                row_y[i] = y
-                Rv  = (1.0 - v) * Rt + v * Rb
-                wave_r = self._wave_offset(y, H)
+            # ---- outer surface ----
+            # r_out[i,j] = Rv[i] + wave[i] + T[i,j]
+            r_out = (Rv + wave)[:, None] + T                            # (R, C)
 
-                # Panel arc: leave gap_half on each side
-                u_arr   = np.linspace(0.0, 1.0, ncols, dtype=np.float64)
-                # map u into [gap_half, theta_step - gap_half]
-                arc_start = p_idx * theta_step + gap_half
-                arc_end   = p_idx * theta_step + theta_step - gap_half
-                angles    = arc_start + u_arr * (arc_end - arc_start)
-                r_out_row = Rv + wave_r + T[i, :]
+            cos_a = np.cos(angles)   # (C,)
+            sin_a = np.sin(angles)   # (C,)
 
-                for j in range(ncols):
-                    cx = r_out_row[j] * np.cos(angles[j])
-                    cz = r_out_row[j] * np.sin(angles[j])
-                    vertices.append([cx, y, cz])
-                    colors.append([float(gray[i, j])] * 3)
-                    # radially outward normal — correct for curved surface
-                    normals.append([np.cos(angles[j]), 0.0, np.sin(angles[j])])
+            x_out = r_out * cos_a                                       # (R, C)
+            y_out = np.broadcast_to(y_arr[:, None], (nrows, ncols)).copy()
+            z_out = r_out * sin_a
 
-                row_angles_list.append(angles)
-                row_radii_list.append(r_out_row)
+            V_out = np.stack([
+                x_out.ravel(), y_out.ravel(), z_out.ravel()], axis=1)  # (R*C, 3)
+            C_out = np.repeat(gray.ravel()[:, None], 3, axis=1)        # (R*C, 3)
+            # normals: [cos(angle), 0, sin(angle)] per column
+            nx = np.broadcast_to(cos_a[None, :], (nrows, ncols)).ravel()
+            nz = np.broadcast_to(sin_a[None, :], (nrows, ncols)).ravel()
+            N_out = np.stack([nx, np.zeros(nrows*ncols), nz], axis=1)
 
-            panel_rows_angles.append(row_angles_list)
-            panel_rows_radii.append(row_radii_list)
-            panel_rows_y.append(row_y)
+            I_out = _quad_indices(offset, nrows, ncols, flip=False)
 
-            # outer surface quads
-            for i in range(nrows - 1):
-                for j in range(ncols - 1):
-                    a = base + i * ncols + j
-                    b = base + i * ncols + (j + 1)
-                    c = base + (i + 1) * ncols + j
-                    d = base + (i + 1) * ncols + (j + 1)
-                    indices.append([a, b, c])
-                    indices.append([b, d, c])
+            top_out_rings.append(np.arange(offset + 0,         offset + ncols))
+            bot_out_rings.append(np.arange(offset + (nrows-1)*ncols,
+                                           offset + nrows*ncols))
 
-            top_outer_ring.extend([base + j for j in range(ncols - 1, -1, -1)])
-            bot_outer_ring.extend([base + (nrows - 1) * ncols + j for j in range(ncols - 1, -1, -1)])
+            V_list.append(V_out); C_list.append(C_out)
+            N_list.append(N_out); I_list.append(I_out)
+            offset += nrows * ncols
 
-            # inner surface (base cylinder at Rv, no image displacement)
-            base_in = len(vertices)
-            for i in range(nrows):
-                v   = i / max(nrows - 1, 1)
-                y   = H * (1.0 - v)
-                Rv  = (1.0 - v) * Rt + v * Rb
-                u_arr  = np.linspace(0.0, 1.0, ncols, dtype=np.float64)
-                arc_start = p_idx * theta_step + gap_half
-                arc_end   = p_idx * theta_step + theta_step - gap_half
-                angles = arc_start + u_arr * (arc_end - arc_start)
-                cx = Rv * np.cos(angles)
-                cz = Rv * np.sin(angles)
-                for j in range(ncols):
-                    vertices.append([cx[j], y, cz[j]])
-                    colors.append([0.6, 0.6, 0.6])
-                    # radially inward normal
-                    normals.append([-np.cos(angles[j]), 0.0, -np.sin(angles[j])])
+            # ---- inner surface ----
+            r_in_arr = np.broadcast_to(Rv[:, None], (nrows, ncols)).copy()  # (R,C)
+            x_in = r_in_arr * cos_a
+            z_in = r_in_arr * sin_a
+            V_in = np.stack([
+                x_in.ravel(), y_out.ravel(), z_in.ravel()], axis=1)
+            C_in = np.full((nrows * ncols, 3), 0.6, dtype=np.float64)
+            N_in = np.stack([-nx, np.zeros(nrows*ncols), -nz], axis=1)
+            I_in = _quad_indices(offset, nrows, ncols, flip=True)
 
-            for i in range(nrows - 1):
-                for j in range(ncols - 1):
-                    a = base_in + i * ncols + j
-                    b = base_in + i * ncols + (j + 1)
-                    c = base_in + (i + 1) * ncols + j
-                    d = base_in + (i + 1) * ncols + (j + 1)
-                    indices.append([a, c, b])
-                    indices.append([b, c, d])
+            V_list.append(V_in); C_list.append(C_in)
+            N_list.append(N_in); I_list.append(I_in)
+            offset += nrows * ncols
 
-            top_inner_ring.extend([base_in + j for j in range(ncols - 1, -1, -1)])
-            bot_inner_ring.extend([base_in + (nrows - 1) * ncols + j for j in range(ncols - 1, -1, -1)])
+            # ---- top edge cap (thin wall at top row) ----
+            I_top = np.stack([
+                np.arange(offset - nrows*ncols - nrows*ncols,
+                           offset - nrows*ncols - nrows*ncols + ncols),   # outer top
+                np.arange(offset - nrows*ncols,
+                           offset - nrows*ncols + ncols),                  # inner top
+            ], axis=0)  # we just do a ring stitch below using indices directly
+            # Simpler: emit explicit cap quads
+            out_top = np.arange(offset - 2*nrows*ncols,
+                                offset - 2*nrows*ncols + ncols, dtype=np.int32)
+            inn_top = np.arange(offset - nrows*ncols,
+                                offset - nrows*ncols + ncols, dtype=np.int32)
+            I_list.append(_ring_indices(out_top, inn_top, flip=True))
 
-        # Cap the thin panel wall at top and bottom
-        if top_outer_ring and top_inner_ring:
-            stitch_rings(indices, top_inner_ring, top_outer_ring, outward=True)
-        if bot_outer_ring and bot_inner_ring:
-            stitch_rings(indices, bot_outer_ring, bot_inner_ring, outward=False)
+            # ---- bottom edge cap ----
+            out_bot = np.arange(offset - 2*nrows*ncols + (nrows-1)*ncols,
+                                offset - 2*nrows*ncols + nrows*ncols, dtype=np.int32)
+            inn_bot = np.arange(offset - nrows*ncols + (nrows-1)*ncols,
+                                offset - nrows*ncols + nrows*ncols, dtype=np.int32)
+            I_list.append(_ring_indices(out_bot, inn_bot, flip=False))
 
-        mid_gray = (0.6, 0.6, 0.6)
+        # ---- gap fillers ----
+        for k in range(NP):
+            t_l = k * ts - gap_half
+            t_r = k * ts + gap_half
+            Vg, Ig = _gap_filler_mesh(
+                offset, t_l, t_r, H, Rt, Rb, gap_t, nrows,
+                wave_fn=self._wave_r)
+            V_list.append(Vg)
+            C_list.append(np.full((len(Vg), 3), 0.6))
+            N_list.append(np.tile([0.0, 0.0, 1.0], (len(Vg), 1)))  # overwritten by smooth normals
+            I_list.append(Ig)
+            offset += len(Vg)
 
-        # ------------------------------------------------------------------
-        # Gap fillers between panels
-        # Each gap is a thin strip at theta = k*theta_step ± gap_half
-        # ------------------------------------------------------------------
-        for k in range(num_panels):
-            theta_center = k * theta_step  # left edge of this panel
-            # left gap (between panel k-1 and panel k)
-            t_left  = theta_center - gap_half
-            t_right = theta_center + gap_half
-            self._build_gap_filler(
-                vertices, colors, normals, indices,
-                theta_left=t_left, theta_right=t_right,
-                H=H, Rt=Rt, Rb=Rb, t_gap=gap_t, nrows=nrows,
-                wave_fn=self._wave_offset, color=mid_gray,
-            )
+        # ---- brims ----
+        n_brim = max(ncols * NP, 64)
+        if p.top_brim_height > 0 and p.top_brim_thickness > 0:
+            Vb, Ib = _top_brim_mesh(
+                offset, Rt, t_min,
+                float(p.top_brim_height), float(p.top_brim_thickness),
+                float(p.top_brim_overhang_angle), H, n_brim)
+            V_list.append(Vb)
+            C_list.append(np.full((len(Vb), 3), 0.6))
+            N_list.append(np.zeros((len(Vb), 3)))  # filled by smooth normals
+            I_list.append(Ib)
+            offset += len(Vb)
 
-        # ------------------------------------------------------------------
-        # Top brim  (annular band, NO inner disc — lamp opening stays open)
-        # ------------------------------------------------------------------
-        if p.top_brim_height > 0 and p.top_brim_thickness > 0 and any(panels_present):
-            self._build_top_brim(
-                vertices, colors, normals, indices,
-                Rt=Rt, t_min=t_min,
-                brim_h=float(p.top_brim_height),
-                brim_t=float(p.top_brim_thickness),
-                overhang_deg=float(p.top_brim_overhang_angle),
-                y0=H,
-                n_pts=max(ncols * num_panels, 64),
-                top_outer_ring=top_outer_ring,
-                color=mid_gray,
-            )
+        if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0:
+            Vb, Ib = _bottom_brim_mesh(
+                offset, Rb,
+                float(p.bottom_brim_height), float(p.bottom_brim_thickness),
+                n_brim)
+            V_list.append(Vb)
+            C_list.append(np.full((len(Vb), 3), 0.6))
+            N_list.append(np.zeros((len(Vb), 3)))
+            I_list.append(Ib)
+            offset += len(Vb)
 
-        # ------------------------------------------------------------------
-        # Bottom brim (annular band, NO inner disc)
-        # ------------------------------------------------------------------
-        if p.bottom_brim_height > 0 and p.bottom_brim_thickness > 0 and any(panels_present):
-            self._build_bottom_brim(
-                vertices, colors, normals, indices,
-                Rb=Rb, t_min=t_min,
-                brim_h=float(p.bottom_brim_height),
-                brim_t=float(p.bottom_brim_thickness),
-                n_pts=max(ncols * num_panels, 64),
-                bot_outer_ring=bot_outer_ring,
-                color=mid_gray,
-            )
-
-        # ------------------------------------------------------------------
-        # Frame pillars between panels
-        # ------------------------------------------------------------------
+        # ---- frames ----
         if p.frame_width > 0 and p.frame_thickness > 0:
-            self._build_frames(
-                vertices, colors, normals, indices,
-                H=H, Rt=Rt, Rb=Rb, t_min=t_min,
-                nrows=nrows,
-                panel_rows_angles=panel_rows_angles,
-                panel_rows_radii=panel_rows_radii,
-                panel_rows_y=panel_rows_y,
-                theta_step=theta_step,
-            )
+            for k in range(NP):
+                theta_b = (k + 1) * ts
+                Vf, If = _frame_mesh(
+                    offset, theta_b,
+                    H, Rt, Rb, t_min, float(p.frame_thickness),
+                    float(p.frame_width), nrows)
+                V_list.append(Vf)
+                C_list.append(np.full((len(Vf), 3), 0.55))
+                N_list.append(np.zeros((len(Vf), 3)))
+                I_list.append(If)
+                offset += len(Vf)
 
-        # Socket is built separately via build_socket()
-        V = np.array(vertices, dtype=np.float64)
-        I = np.array(indices,  dtype=np.int32)
-        C = np.array(colors,   dtype=np.float64)
-        N = compute_smooth_normals(V, I) if len(I) > 0 else np.zeros_like(V)
+        V = np.concatenate(V_list, axis=0).astype(np.float64)
+        I = np.concatenate(I_list, axis=0).astype(np.int32)
+        C = np.concatenate(C_list, axis=0).astype(np.float64)
+        N = _smooth_normals(V, I)
         return V, I, N, C
 
-    # ------------------------------------------------------------------
-    def _build_gap_filler(self, vertices, colors, normals, indices,
-                          theta_left, theta_right, H, Rt, Rb, t_gap, nrows,
-                          wave_fn, color):
-        """Fill the angular gap between two panels with a flat strip."""
-        base = len(vertices)
-        for i in range(nrows):
-            v  = i / max(nrows - 1, 1)
-            y  = H * (1.0 - v)
-            Rv = (1.0 - v) * Rt + v * Rb
-            wave_r = wave_fn(y, H)
-            r_out = Rv + wave_r + t_gap
-            r_in  = Rv
-            for theta in [theta_left, theta_right]:
-                for r in [r_in, r_out]:
-                    cx = r * np.cos(theta)
-                    cz = r * np.sin(theta)
-                    vertices.append([cx, y, cz])
-                    colors.append(list(color))
-                    normals.append([np.cos(theta), 0.0, np.sin(theta)])
-        # 4 vertices per row: [left_in, left_out, right_in, right_out]
-        for i in range(nrows - 1):
-            b0 = base + i * 4
-            b1 = base + (i + 1) * 4
-            # outer face (left_out, right_out)
-            indices.append([b0+1, b0+3, b1+1]); indices.append([b0+3, b1+3, b1+1])
-            # inner face
-            indices.append([b0+0, b1+0, b0+2]); indices.append([b0+2, b1+0, b1+2])
-            # left edge
-            indices.append([b0+0, b0+1, b1+0]); indices.append([b0+1, b1+1, b1+0])
-            # right edge
-            indices.append([b0+2, b1+2, b0+3]); indices.append([b1+2, b1+3, b0+3])
-        # top cap
-        tb = base
-        indices.append([tb+0, tb+1, tb+2]); indices.append([tb+1, tb+3, tb+2])
-        # bottom cap
-        bb = base + (nrows - 1) * 4
-        indices.append([bb+0, bb+2, bb+1]); indices.append([bb+1, bb+2, bb+3])
-
-    # ------------------------------------------------------------------
-    def _build_top_brim(self, vertices, colors, normals, indices,
-                        Rt, t_min, brim_h, brim_t, overhang_deg, y0,
-                        n_pts, top_outer_ring, color):
-        """Annular top brim.  r_inner = Rt+t_min, r_outer flares outward.
-        overhang_deg: if >0, the outer wall leans outward (like LithophaneMaker
-        'overhang angle') so no support is needed."""
-        r_inner = Rt + t_min
-        r_outer_bot = r_inner + brim_t
-        # outer radius at top after overhang
-        overhang_extra = brim_h * np.tan(np.radians(max(overhang_deg, 0.0)))
-        r_outer_top = r_outer_bot + overhang_extra
-
-        def ring(r, y, ntype='up'):
-            s = len(vertices)
-            angs = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-            for ang in angs:
-                vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
-                colors.append(list(color))
-                if ntype == 'outward':
-                    normals.append([np.cos(ang), 0.0, np.sin(ang)])
-                elif ntype == 'down':
-                    normals.append([0.0, -1.0, 0.0])
-                else:
-                    normals.append([0.0, 1.0, 0.0])
-            return list(range(s, s + n_pts))
-
-        def stitch(a, b, outward=True):
-            n = len(a)
-            for ii in range(n):
-                jj = (ii + 1) % n
-                if outward:
-                    indices.append([a[ii], b[ii], a[jj]])
-                    indices.append([a[jj], b[ii], b[jj]])
-                else:
-                    indices.append([a[ii], a[jj], b[ii]])
-                    indices.append([a[jj], b[jj], b[ii]])
-
-        # Underside ring at r_inner, y0 — stitch to panel tops
-        base_inner = ring(r_inner, y0, 'down')
-        base_outer = ring(r_outer_bot, y0, 'down')
-
-        # Stitch panel top edges to base_inner slice
-        if top_outer_ring:
-            m = len(base_inner)
-            # panel outer ring may have fewer vertices — map by angle
-            # simplest: stitch directly if counts match, else skip
-            if len(top_outer_ring) == m:
-                stitch_rings(indices, top_outer_ring, base_inner, outward=False)
-
-        # Flat underside annulus
-        stitch(base_inner, base_outer, outward=False)
-
-        # Outer wall (with overhang)
-        top_outer = ring(r_outer_top, y0 + brim_h, 'outward')
-        stitch(base_outer, top_outer, outward=False)
-
-        # Top face annulus
-        top_inner = ring(r_inner, y0 + brim_h, 'up')
-        stitch(top_inner, top_outer, outward=False)
-
-    # ------------------------------------------------------------------
-    def _build_bottom_brim(self, vertices, colors, normals, indices,
-                           Rb, t_min, brim_h, brim_t, n_pts,
-                           bot_outer_ring, color):
-        """Annular bottom brim.  No inner disc — floor opening stays open."""
-        r_inner = Rb
-        r_outer = Rb + brim_t
-        y_top   = 0.0
-        y_bot   = -brim_h
-
-        def ring(r, y, ntype='up'):
-            s = len(vertices)
-            angs = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-            for ang in angs:
-                vertices.append([r * np.cos(ang), y, r * np.sin(ang)])
-                colors.append(list(color))
-                if ntype == 'outward':
-                    normals.append([np.cos(ang), 0.0, np.sin(ang)])
-                elif ntype == 'down':
-                    normals.append([0.0, -1.0, 0.0])
-                elif ntype == 'inward':
-                    normals.append([-np.cos(ang), 0.0, -np.sin(ang)])
-                else:
-                    normals.append([0.0, 1.0, 0.0])
-            return list(range(s, s + n_pts))
-
-        def stitch(a, b, outward=True):
-            n = len(a)
-            for ii in range(n):
-                jj = (ii + 1) % n
-                if outward:
-                    indices.append([a[ii], b[ii], a[jj]])
-                    indices.append([a[jj], b[ii], b[jj]])
-                else:
-                    indices.append([a[ii], a[jj], b[ii]])
-                    indices.append([a[jj], b[jj], b[ii]])
-
-        inner_top = ring(r_inner, y_top, 'inward')
-        outer_top = ring(r_outer, y_top, 'outward')
-
-        # Stitch panel bottom edges to inner_top
-        if bot_outer_ring and len(bot_outer_ring) == len(inner_top):
-            stitch_rings(indices, bot_outer_ring, inner_top, outward=False)
-
-        # Top face annulus (faces down into shade)
-        stitch(inner_top, outer_top, outward=False)
-
-        # Inner vertical wall
-        inner_bot = ring(r_inner, y_bot, 'inward')
-        stitch(inner_bot, inner_top, outward=True)
-
-        # Outer vertical wall
-        outer_bot = ring(r_outer, y_bot, 'outward')
-        stitch(outer_top, outer_bot, outward=False)
-
-        # Bottom face annulus
-        stitch(inner_bot, outer_bot, outward=True)
-
-    # ------------------------------------------------------------------
-    def _build_frames(self, vertices, colors, normals, indices,
-                      H, Rt, Rb, t_min, nrows,
-                      panel_rows_angles, panel_rows_radii, panel_rows_y,
-                      theta_step):
-        p = self.p
-        num_panels = p.num_panels
-        r_avg = (Rt + Rb) * 0.5
-        gap_half = (float(p.gap_mm) * 0.5) / max(r_avg, 1.0)
-        ys = np.linspace(0.0, H, nrows + 1, dtype=np.float64)
-
-        for k in range(num_panels):
-            theta_boundary = (k + 1) * theta_step
-            half_dw   = (p.frame_width / 2.0) / max(Rt, 1e-6)
-            theta_left  = theta_boundary - half_dw
-            theta_right = theta_boundary + half_dw
-
-            left_idx  = k % num_panels
-            right_idx = (k + 1) % num_panels
-            left_y    = panel_rows_y[left_idx]
-            right_y   = panel_rows_y[right_idx]
-
-            pillar_base = len(vertices)
-            pillar_r_by_level = []
-
-            for y_val in ys:
-                v  = 0.0 if H <= 0 else (H - y_val) / H
-                Rv = (1.0 - v) * Rt + v * Rb
-                baseline = Rv + t_min
-
-                # interpolate outer radius from adjacent panels
-                def _interp_r(rows_angles, rows_radii, py, theta):
-                    if py.size == 0:
-                        return baseline
-                    li = int(np.argmin(np.abs(py - y_val)))
-                    la = np.asarray(rows_angles[li]).ravel()
-                    lr = np.asarray(rows_radii[li]).ravel()
-                    if la.size < 2:
-                        return baseline
-                    idx = np.argsort(la)
-                    la, lr = la[idx], lr[idx]
-                    return float(np.interp(np.clip(theta, la.min(), la.max()), la, lr))
-
-                r_left  = _interp_r(panel_rows_angles[left_idx],  panel_rows_radii[left_idx],  left_y,  theta_left)
-                r_right = _interp_r(panel_rows_angles[right_idx], panel_rows_radii[right_idx], right_y, theta_right)
-                r_out   = max(baseline + p.frame_thickness, r_left + 1e-3, r_right + 1e-3)
-                pillar_r_by_level.append((r_left, r_right, r_out))
-
-                for idx2, (r, th) in enumerate([
-                        (r_left,  theta_left),
-                        (r_right, theta_right),
-                        (r_out,   theta_left),
-                        (r_out,   theta_right)]):
-                    vertices.append([r * np.cos(th), y_val, r * np.sin(th)])
-                    colors.append([0.55, 0.55, 0.55])
-                    normals.append([-np.cos(th), 0, -np.sin(th)] if idx2 < 2
-                                   else [np.cos(th), 0, np.sin(th)])
-
-            n_steps = len(ys)
-            for s in range(n_steps - 1):
-                b0 = pillar_base + s * 4
-                b1 = pillar_base + (s + 1) * 4
-                indices.append([b0+0, b1+0, b0+1]); indices.append([b1+0, b1+1, b0+1])
-                indices.append([b0+2, b0+3, b1+2]); indices.append([b1+2, b0+3, b1+3])
-                indices.append([b0+0, b0+2, b1+0]); indices.append([b1+0, b0+2, b1+2])
-                indices.append([b0+1, b1+1, b0+3]); indices.append([b1+1, b1+3, b0+3])
-
-            # bottom cap
-            cb = len(vertices)
-            for ci in range(4):
-                vertices.append(list(vertices[pillar_base + ci]))
-                colors.append([0.55, 0.55, 0.55])
-                normals.append([0.0, -1.0, 0.0])
-            indices.append([cb+0, cb+1, cb+2]); indices.append([cb+1, cb+3, cb+2])
-
-            # top cap
-            et = pillar_base + (n_steps - 1) * 4
-            ct = len(vertices)
-            for ci in range(4):
-                vertices.append(list(vertices[et + ci]))
-                colors.append([0.55, 0.55, 0.55])
-                normals.append([0.0, 1.0, 0.0])
-            indices.append([ct+0, ct+2, ct+1]); indices.append([ct+1, ct+2, ct+3])
-
-    # ------------------------------------------------------------------
-    # Socket & spokes
-    # ------------------------------------------------------------------
-    def _build_socket(self, vertices, colors, normals, indices,
-                      y_base, y_top, r_inner, r_outer,
-                      lip_height, lip_overhang, color, n_seg=64):
-        angles = np.linspace(0, 2 * np.pi, n_seg, endpoint=False)
-        r_lip  = max(r_inner - lip_overhang, 1.0)
-        y_lip  = y_top - lip_height
-
-        def add_ring(r, y, nrm_fn):
-            s = len(vertices)
-            for a in angles:
-                vertices.append([r * np.cos(a), y, r * np.sin(a)])
-                colors.append(list(color))
-                normals.append(list(nrm_fn(a)))
-            return list(range(s, s + n_seg))
-
-        up      = lambda a: [0.0,  1.0, 0.0]
-        dn      = lambda a: [0.0, -1.0, 0.0]
-        r_out_n = lambda a: [ np.cos(a), 0.0,  np.sin(a)]
-        r_in_n  = lambda a: [-np.cos(a), 0.0, -np.sin(a)]
-
-        ri_base = add_ring(r_inner, y_base, r_in_n)
-        ro_base = add_ring(r_outer, y_base, r_out_n)
-        ri_lip  = add_ring(r_inner, y_lip,  r_in_n)
-        ro_lip  = add_ring(r_outer, y_lip,  r_out_n)
-        rl_lip  = add_ring(r_lip,   y_lip,  dn)
-        rl_top  = add_ring(r_lip,   y_top,  r_in_n)
-        ri_top  = add_ring(r_inner, y_top,  up)
-        ro_top  = add_ring(r_outer, y_top,  up)
-
-        def quad(a, b, c, d):
-            indices.append([a, b, c]); indices.append([a, c, d])
-
-        for i in range(n_seg):
-            j = (i + 1) % n_seg
-            quad(ro_base[i], ro_top[i],  ro_top[j],  ro_base[j])
-            quad(ri_lip[j],  ri_base[j], ri_base[i], ri_lip[i])
-            quad(ro_base[i], ri_base[i], ri_base[j], ro_base[j])
-            quad(rl_lip[j],  rl_top[j],  rl_top[i],  rl_lip[i])
-            quad(ri_lip[i],  rl_lip[i],  rl_lip[j],  ri_lip[j])
-            quad(rl_top[i],  ri_top[i],  ri_top[j],  rl_top[j])
-            quad(ri_top[i],  ro_top[i],  ro_top[j],  ri_top[j])
-
-    def _build_spokes(self, vertices, colors, normals, indices,
-                      y_bot, y_top, r_hub, r_rim, n_spokes, spoke_w, color):
-        angle_step = 2.0 * np.pi / n_spokes
-        half_w = spoke_w / 2.0
-        for k in range(n_spokes):
-            a_ctr = k * angle_step
-            tx = -np.sin(a_ctr); tz = np.cos(a_ctr)
-            rx =  np.cos(a_ctr); rz = np.sin(a_ctr)
-
-            def pt(r, side, yy):
-                return [r * rx + side * half_w * tx, yy, r * rz + side * half_w * tz]
-
-            corners = [
-                pt(r_hub, -1, y_bot), pt(r_hub, +1, y_bot),
-                pt(r_rim, -1, y_bot), pt(r_rim, +1, y_bot),
-                pt(r_hub, -1, y_top), pt(r_hub, +1, y_top),
-                pt(r_rim, -1, y_top), pt(r_rim, +1, y_top),
-            ]
-            base = len(vertices)
-            for cx, cy, cz in corners:
-                vertices.append([cx, cy, cz])
-                colors.append(list(color))
-                normals.append([0.0, 1.0, 0.0])
-
-            def f(a, b, c): indices.append([base + a, base + b, base + c])
-            f(4, 6, 5); f(5, 6, 7)
-            f(0, 1, 2); f(1, 3, 2)
-            f(0, 4, 1); f(4, 5, 1)
-            f(2, 3, 6); f(3, 7, 6)
-            f(0, 2, 4); f(4, 2, 6)
-            f(1, 5, 3); f(5, 7, 3)
-
-    # ------------------------------------------------------------------
-    # Sphere mode
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Sphere shade
+    # -----------------------------------------------------------------------
     def _build_sphere(self, imgs):
         p = self.p
-        R  = float(p.top_diam) / 2.0
-        num_panels  = p.num_panels
-        theta_step  = 2.0 * np.pi / num_panels
+        R   = float(p.top_diam) / 2.0
+        NP  = p.num_panels
+        ts  = 2.0 * np.pi / NP
         t_min, t_max = float(p.min_thickness), float(p.max_thickness)
-        res  = max(float(p.resolution_mm), 0.1)
-        circ = np.pi * R
-        nrows = max(int(round(circ / res)), 8)
-        ncols = max(int(round(R * theta_step / res)), 8)
-        vertices, colors, normals, indices = [], [], [], []
+        res   = max(float(p.resolution_mm), 0.1)
+        nrows = int(np.clip(round(np.pi * R / res), 8, MAX_ROWS))
+        ncols = int(np.clip(round(R * ts / res),    8, MAX_COLS))
+
+        phi_arr = np.linspace(0.0, np.pi, nrows, dtype=np.float64)
+        u_arr   = np.linspace(0.0, 1.0,   ncols, dtype=np.float64)
+
+        V_list, C_list, N_list, I_list = [], [], [], []
+        offset = 0
         for p_idx, img in enumerate(imgs):
             if img is None:
                 continue
             T    = self._img_to_thickness(img, nrows, ncols)
             gray = 1.0 - np.clip((T - t_min) / max(t_max - t_min, 1e-6), 0, 1)
-            base = len(vertices)
-            for i in range(nrows):
-                phi = np.pi * i / max(nrows - 1, 1)
-                for j in range(ncols):
-                    u     = j / max(ncols - 1, 1)
-                    theta = p_idx * theta_step + u * theta_step
-                    r = R + T[i, j]
-                    vertices.append([r*np.sin(phi)*np.cos(theta),
-                                     r*np.cos(phi),
-                                     r*np.sin(phi)*np.sin(theta)])
-                    colors.append([float(gray[i, j])] * 3)
-                    normals.append([np.sin(phi)*np.cos(theta),
-                                    np.cos(phi),
-                                    np.sin(phi)*np.sin(theta)])
-            for i in range(nrows - 1):
-                for j in range(ncols - 1):
-                    a = base + i*ncols + j
-                    b = base + i*ncols + (j+1)
-                    c = base + (i+1)*ncols + j
-                    d = base + (i+1)*ncols + (j+1)
-                    indices.append([a, b, c]); indices.append([b, d, c])
-        V = np.array(vertices, dtype=np.float64)
-        I = np.array(indices,  dtype=np.int32)
-        C = np.array(colors,   dtype=np.float64)
-        N = compute_smooth_normals(V, I) if len(I) > 0 else np.zeros_like(V)
+
+            theta = p_idx * ts + u_arr * ts    # (C,)
+            r_out = R + T                      # (R, C)
+
+            sp = np.sin(phi_arr)[:, None]; cp = np.cos(phi_arr)[:, None]
+            st = np.sin(theta)[None, :];  ct = np.cos(theta)[None, :]
+
+            Vo = np.stack([
+                (r_out * sp * ct).ravel(),
+                (r_out * cp     ).ravel(),
+                (r_out * sp * st).ravel()], axis=1)
+            No = np.stack([
+                (sp * ct).ravel(),
+                (cp     ).ravel(),
+                (sp * st).ravel()], axis=1)
+            Co = np.repeat(gray.ravel()[:, None], 3, axis=1)
+            Io = _quad_indices(offset, nrows, ncols)
+
+            V_list.append(Vo); C_list.append(Co)
+            N_list.append(No); I_list.append(Io)
+            offset += nrows * ncols
+
+        if not V_list:
+            empty = np.zeros((0, 3), dtype=np.float64)
+            return empty, np.zeros((0, 3), dtype=np.int32), empty, empty
+        V = np.concatenate(V_list).astype(np.float64)
+        I = np.concatenate(I_list).astype(np.int32)
+        C = np.concatenate(C_list).astype(np.float64)
+        N = _smooth_normals(V, I)
         return V, I, N, C
 
-    # ------------------------------------------------------------------
-    # Flat mode
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Flat shade
+    # -----------------------------------------------------------------------
     def _build_flat(self, imgs):
         p = self.p
         W, H = float(p.bottom_diam), float(p.height)
         t_min, t_max = float(p.min_thickness), float(p.max_thickness)
-        res      = max(float(p.resolution_mm), 0.1)
-        nrows    = max(int(round(H / res)), 8)
-        ncols    = max(int(round(W / res / max(p.num_panels, 1))), 8)
-        panel_w  = W / max(p.num_panels, 1)
-        vertices, colors, normals, indices = [], [], [], []
+        res    = max(float(p.resolution_mm), 0.1)
+        nrows  = int(np.clip(round(H / res), 8, MAX_ROWS))
+        ncols  = int(np.clip(round(W / res / max(p.num_panels, 1)), 8, MAX_COLS))
+        pw     = W / max(p.num_panels, 1)
+
+        xi = np.linspace(0.0, pw, ncols, dtype=np.float64)
+        yi = np.linspace(0.0, H,  nrows, dtype=np.float64)
+        XX, YY = np.meshgrid(xi, yi, indexing='ij')   # (C, R) → transpose
+        XX = XX.T; YY = YY.T  # (R, C)
+
+        V_list, C_list, N_list, I_list = [], [], [], []
+        offset = 0
         for p_idx, img in enumerate(imgs):
             if img is None:
                 continue
             T    = self._img_to_thickness(img, nrows, ncols)
             gray = 1.0 - np.clip((T - t_min) / max(t_max - t_min, 1e-6), 0, 1)
-            x_off = p_idx * panel_w
-            base  = len(vertices)
-            for i in range(nrows):
-                for j in range(ncols):
-                    x = x_off + j / max(ncols - 1, 1) * panel_w
-                    y = i / max(nrows - 1, 1) * H
-                    z = T[i, j]
-                    vertices.append([x, y, z])
-                    colors.append([float(gray[i, j])] * 3)
-                    normals.append([0, 0, 1])
-            for i in range(nrows - 1):
-                for j in range(ncols - 1):
-                    a = base + i*ncols + j
-                    b = base + i*ncols + (j+1)
-                    c = base + (i+1)*ncols + j
-                    d = base + (i+1)*ncols + (j+1)
-                    indices.append([a, b, c]); indices.append([b, d, c])
-        V = np.array(vertices, dtype=np.float64)
-        I = np.array(indices,  dtype=np.int32)
-        C = np.array(colors,   dtype=np.float64)
-        N = compute_smooth_normals(V, I) if len(I) > 0 else np.zeros_like(V)
+            x_off = p_idx * pw
+            Vo = np.stack([
+                (XX + x_off).ravel(),
+                YY.ravel(),
+                T.ravel()], axis=1)
+            No = np.tile([0.0, 0.0, 1.0], (nrows * ncols, 1))
+            Co = np.repeat(gray.ravel()[:, None], 3, axis=1)
+            Io = _quad_indices(offset, nrows, ncols)
+            V_list.append(Vo); C_list.append(Co)
+            N_list.append(No); I_list.append(Io)
+            offset += nrows * ncols
+
+        if not V_list:
+            empty = np.zeros((0, 3), dtype=np.float64)
+            return empty, np.zeros((0, 3), dtype=np.int32), empty, empty
+        V = np.concatenate(V_list).astype(np.float64)
+        I = np.concatenate(I_list).astype(np.int32)
+        C = np.concatenate(C_list).astype(np.float64)
+        N = _smooth_normals(V, I)
         return V, I, N, C
+
+
+# ---------------------------------------------------------------------------
+# Stand-alone mesh builders (no Python loops, return V, I arrays)
+# ---------------------------------------------------------------------------
+
+def _gap_filler_mesh(offset, theta_l, theta_r, H, Rt, Rb,
+                     t_gap, nrows, wave_fn) -> Tuple[np.ndarray, np.ndarray]:
+    """Two-theta-column strip filling the gap. Returns (V, I)."""
+    v  = np.linspace(0.0, 1.0, nrows, dtype=np.float64)
+    y  = H * (1.0 - v)
+    Rv = (1.0 - v) * Rt + v * Rb
+    wave = wave_fn(y, H)
+    r_out = Rv + wave + t_gap
+    r_in  = Rv
+
+    # 4 verts per row: left_in, left_out, right_in, right_out
+    lx_in  = r_in  * np.cos(theta_l);  lz_in  = r_in  * np.sin(theta_l)
+    lx_out = r_out * np.cos(theta_l);  lz_out = r_out * np.sin(theta_l)
+    rx_in  = r_in  * np.cos(theta_r);  rz_in  = r_in  * np.sin(theta_r)
+    rx_out = r_out * np.cos(theta_r);  rz_out = r_out * np.sin(theta_r)
+
+    V = np.stack([
+        np.stack([lx_in,  y, lz_in ], axis=1),
+        np.stack([lx_out, y, lz_out], axis=1),
+        np.stack([rx_in,  y, rz_in ], axis=1),
+        np.stack([rx_out, y, rz_out], axis=1),
+    ]).transpose(1, 0, 2).reshape(-1, 3)  # (4R, 3), order: row0:[li,lo,ri,ro], row1:...
+
+    k   = np.arange(nrows - 1, dtype=np.int32)
+    b0  = offset + k * 4
+    b1  = offset + (k + 1) * 4
+    # outer face
+    t1  = np.stack([b0+1, b0+3, b1+1], axis=1)
+    t2  = np.stack([b0+3, b1+3, b1+1], axis=1)
+    # inner face
+    t3  = np.stack([b0+0, b1+0, b0+2], axis=1)
+    t4  = np.stack([b0+2, b1+0, b1+2], axis=1)
+    # left edge
+    t5  = np.stack([b0+0, b0+1, b1+0], axis=1)
+    t6  = np.stack([b0+1, b1+1, b1+0], axis=1)
+    # right edge
+    t7  = np.stack([b0+2, b1+2, b0+3], axis=1)
+    t8  = np.stack([b1+2, b1+3, b0+3], axis=1)
+    # top cap (row 0)
+    tb  = offset
+    t9  = np.array([[tb+0, tb+1, tb+2], [tb+1, tb+3, tb+2]], dtype=np.int32)
+    # bot cap
+    bb  = offset + (nrows - 1) * 4
+    t10 = np.array([[bb+0, bb+2, bb+1], [bb+1, bb+2, bb+3]], dtype=np.int32)
+
+    I = np.concatenate([t1, t2, t3, t4, t5, t6, t7, t8, t9, t10], axis=0)
+    return V, I
+
+
+def _annular_ring_mesh(offset, r_inner, r_outer, y,
+                       n_pts, normal_dir='up') -> Tuple[np.ndarray, np.ndarray]:
+    """Flat annulus at height y."""
+    angs = np.linspace(0, 2 * np.pi, n_pts, endpoint=False, dtype=np.float64)
+    ci, si = np.cos(angs), np.sin(angs)
+    yin = np.full(n_pts, y, dtype=np.float64)
+
+    if normal_dir == 'up':
+        ny = 1.0
+    else:
+        ny = -1.0
+
+    Vi = np.stack([r_inner * ci, yin, r_inner * si], axis=1)
+    Vo = np.stack([r_outer * ci, yin, r_outer * si], axis=1)
+    Ni = np.tile([0.0, ny, 0.0], (n_pts, 1))
+    No = Ni.copy()
+    V  = np.concatenate([Vi, Vo], axis=0)   # inner first, then outer
+
+    ai  = np.arange(n_pts, dtype=np.int32)
+    ain = (ai + 1) % n_pts
+    bi  = ai + n_pts
+    bin_ = ain + n_pts
+    if ny > 0:  # up → outward winding
+        t1 = np.stack([offset + ai, offset + bi, offset + ain], axis=1)
+        t2 = np.stack([offset + ain, offset + bi, offset + bin_], axis=1)
+    else:
+        t1 = np.stack([offset + ai, offset + ain, offset + bi],  axis=1)
+        t2 = np.stack([offset + ain, offset + bin_, offset + bi], axis=1)
+    I = np.concatenate([t1, t2], axis=0)
+    return V, I
+
+
+def _vertical_cylinder_mesh(offset, r, y_bot, y_top,
+                             n_pts, outward=True) -> Tuple[np.ndarray, np.ndarray]:
+    angs = np.linspace(0, 2 * np.pi, n_pts, endpoint=False, dtype=np.float64)
+    ci, si = np.cos(angs), np.sin(angs)
+    Vbot = np.stack([r * ci, np.full(n_pts, y_bot), r * si], axis=1)
+    Vtop = np.stack([r * ci, np.full(n_pts, y_top), r * si], axis=1)
+    V    = np.concatenate([Vbot, Vtop], axis=0)
+    ai   = np.arange(n_pts, dtype=np.int32)
+    ain  = (ai + 1) % n_pts
+    bi   = ai + n_pts; bin_ = ain + n_pts
+    if outward:
+        t1 = np.stack([offset+ai, offset+bi,   offset+ain], axis=1)
+        t2 = np.stack([offset+ain, offset+bi,  offset+bin_], axis=1)
+    else:
+        t1 = np.stack([offset+ai, offset+ain,  offset+bi],  axis=1)
+        t2 = np.stack([offset+ain, offset+bin_, offset+bi], axis=1)
+    return V, np.concatenate([t1, t2])
+
+
+def _top_brim_mesh(offset, Rt, t_min, brim_h, brim_t,
+                   overhang_deg, y0, n_pts) -> Tuple[np.ndarray, np.ndarray]:
+    """Annular top brim: outer wall + top face + underside annulus."""
+    r_i  = Rt + t_min
+    r_ob = r_i + brim_t
+    r_ot = r_ob + brim_h * np.tan(np.radians(max(overhang_deg, 0.0)))
+
+    Vl, Il = [], []
+    off = offset
+
+    # underside annulus at y0
+    V, I = _annular_ring_mesh(off, r_i, r_ob, y0, n_pts, 'down')
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # outer wall  r_ob@y0 -> r_ot@(y0+brim_h)
+    V, I = _vertical_cylinder_mesh(off, r_ob, y0, y0 + brim_h, n_pts, outward=True)
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # top face annulus
+    V, I = _annular_ring_mesh(off, r_i, r_ot, y0 + brim_h, n_pts, 'up')
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # inner wall (straight)
+    V, I = _vertical_cylinder_mesh(off, r_i, y0, y0 + brim_h, n_pts, outward=False)
+    Vl.append(V); Il.append(I); off += len(V)
+
+    V_all = np.concatenate(Vl)
+    I_all = np.concatenate(Il)
+    return V_all, I_all
+
+
+def _bottom_brim_mesh(offset, Rb, brim_h, brim_t,
+                      n_pts) -> Tuple[np.ndarray, np.ndarray]:
+    """Annular bottom brim."""
+    r_i = Rb
+    r_o = Rb + brim_t
+    y_top = 0.0
+    y_bot = -brim_h
+
+    Vl, Il = [], []
+    off = offset
+
+    # top face annulus
+    V, I = _annular_ring_mesh(off, r_i, r_o, y_top, n_pts, 'up')
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # outer wall
+    V, I = _vertical_cylinder_mesh(off, r_o, y_bot, y_top, n_pts, outward=True)
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # inner wall
+    V, I = _vertical_cylinder_mesh(off, r_i, y_bot, y_top, n_pts, outward=False)
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # bottom face annulus
+    V, I = _annular_ring_mesh(off, r_i, r_o, y_bot, n_pts, 'down')
+    Vl.append(V); Il.append(I); off += len(V)
+
+    return np.concatenate(Vl), np.concatenate(Il)
+
+
+def _frame_mesh(offset, theta_b, H, Rt, Rb, t_min,
+                frame_t, frame_w, nrows) -> Tuple[np.ndarray, np.ndarray]:
+    """A single inter-panel pillar at angle theta_b, vectorised."""
+    half_dw = (frame_w / 2.0) / max(Rt, 1e-6)
+    tl = theta_b - half_dw
+    tr = theta_b + half_dw
+
+    v   = np.linspace(0.0, 1.0, nrows + 1, dtype=np.float64)
+    y   = H * (1.0 - v)
+    Rv  = (1.0 - v) * Rt + v * Rb
+    r_base = Rv + t_min
+    r_out  = r_base + frame_t
+
+    # 4 vertices per level: left_base, right_base, left_out, right_out
+    def pts(r, theta):
+        return np.stack([r * np.cos(theta), y, r * np.sin(theta)], axis=1)
+
+    V = np.concatenate([
+        pts(r_base, tl), pts(r_base, tr),
+        pts(r_out,  tl), pts(r_out,  tr)
+    ], axis=1).reshape(-1, 3)  # wrong shape
+    # redo properly: interleave 4 columns
+    N = nrows + 1
+    V = np.empty((N * 4, 3), dtype=np.float64)
+    V[0::4] = pts(r_base, tl)
+    V[1::4] = pts(r_base, tr)
+    V[2::4] = pts(r_out,  tl)
+    V[3::4] = pts(r_out,  tr)
+
+    k  = np.arange(nrows, dtype=np.int32)
+    b0 = offset + k * 4
+    b1 = offset + (k + 1) * 4
+
+    # front face (outer)
+    t1 = np.stack([b0+2, b0+3, b1+2], axis=1)
+    t2 = np.stack([b0+3, b1+3, b1+2], axis=1)
+    # back face (inner)
+    t3 = np.stack([b0+0, b1+0, b0+1], axis=1)
+    t4 = np.stack([b0+1, b1+0, b1+1], axis=1)
+    # left side
+    t5 = np.stack([b0+0, b0+2, b1+0], axis=1)
+    t6 = np.stack([b0+2, b1+2, b1+0], axis=1)
+    # right side
+    t7 = np.stack([b0+1, b1+1, b0+3], axis=1)
+    t8 = np.stack([b0+3, b1+1, b1+3], axis=1)
+
+    n_v = len(V)
+    # bottom cap
+    tc = np.array([[offset+0, offset+1, offset+2],
+                   [offset+1, offset+3, offset+2]], dtype=np.int32)
+    # top cap
+    et = offset + (nrows) * 4
+    tt = np.array([[et+0, et+2, et+1], [et+1, et+2, et+3]], dtype=np.int32)
+
+    I = np.concatenate([t1,t2,t3,t4,t5,t6,t7,t8,tc,tt])
+    return V, I
+
+
+def _build_socket_mesh(y_base, y_top, r_inner, r_outer,
+                       lip_height, lip_overhang, n_seg=64
+                       ) -> Tuple[np.ndarray, np.ndarray]:
+    r_lip = max(r_inner - lip_overhang, 1.0)
+    y_lip = y_top - lip_height
+
+    Vl, Il = [], []
+    off = 0
+
+    # outer wall (full height)
+    V, I = _vertical_cylinder_mesh(off, r_outer, y_base, y_top, n_seg, outward=True)
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # inner wall (base to lip)
+    V, I = _vertical_cylinder_mesh(off, r_inner, y_base, y_lip, n_seg, outward=False)
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # bottom annulus
+    V, I = _annular_ring_mesh(off, r_inner, r_outer, y_base, n_seg, 'down')
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # lip annulus (step inward)
+    V, I = _annular_ring_mesh(off, r_lip, r_inner, y_lip, n_seg, 'down')
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # lip inner wall (lip to top)
+    V, I = _vertical_cylinder_mesh(off, r_lip, y_lip, y_top, n_seg, outward=False)
+    Vl.append(V); Il.append(I); off += len(V)
+
+    # top annulus (r_lip to r_outer)
+    V, I = _annular_ring_mesh(off, r_lip, r_outer, y_top, n_seg, 'up')
+    Vl.append(V); Il.append(I); off += len(V)
+
+    return np.concatenate(Vl), np.concatenate(Il)
+
+
+def _build_spokes_mesh(y_bot, y_top, r_hub, r_rim,
+                       n_spokes, spoke_w) -> Tuple[np.ndarray, np.ndarray]:
+    Vl, Il = [], []
+    off = 0
+    ang = np.linspace(0, 2 * np.pi, n_spokes, endpoint=False)
+    hw  = spoke_w / 2.0
+    for a in ang:
+        tx = -np.sin(a); tz = np.cos(a)
+        rx = np.cos(a);  rz = np.sin(a)
+        # 8 corners of a box
+        def pt(r, s, yy):
+            return [r*rx + s*hw*tx, yy, r*rz + s*hw*tz]
+        corners = np.array([
+            pt(r_hub,-1,y_bot), pt(r_hub,+1,y_bot),
+            pt(r_rim,-1,y_bot), pt(r_rim,+1,y_bot),
+            pt(r_hub,-1,y_top), pt(r_hub,+1,y_top),
+            pt(r_rim,-1,y_top), pt(r_rim,+1,y_top),
+        ], dtype=np.float64)
+        faces = np.array([
+            [4,6,5],[5,6,7],
+            [0,1,2],[1,3,2],
+            [0,4,1],[4,5,1],
+            [2,3,6],[3,7,6],
+            [0,2,4],[4,2,6],
+            [1,5,3],[5,7,3],
+        ], dtype=np.int32) + off
+        Vl.append(corners); Il.append(faces); off += 8
+    return np.concatenate(Vl), np.concatenate(Il)
